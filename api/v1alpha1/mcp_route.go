@@ -43,8 +43,8 @@ type MCPRouteList struct {
 // MCPRouteSpec details the MCPRoute configuration.
 type MCPRouteSpec struct {
 	// ParentRefs are the names of the Gateway resources this MCPRoute is being attached to.
-	// Cross namespace references are not supported. In other words, the Gateway resources must be in the
-	// same namespace as the MCPRoute. Currently, each reference's Kind must be Gateway.
+	// Cross namespace references are supported. In other words, the Gateway resources can be in the
+	// same namespace or a different namespace as the MCPRoute. Currently, each reference's Kind must be Gateway.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1

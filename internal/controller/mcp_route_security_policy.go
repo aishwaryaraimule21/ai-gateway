@@ -312,7 +312,7 @@ func buildResourceMetadataURL(metadata *aigv1a1.ProtectedResourceMetadata) strin
 
 	// Some agents do not expect the path component to be included in the resource_metadata URL, but according to the
 	// spec https://mcp.mintlify.app/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements
-	// they should honor hte value returned here.
+	// they should honor the value returned here.
 	// We can't expose these resource at the root, because there may be multiple MCP routes with different OAuth settings, so we need
 	// to rely on clients properly implementing the spec and using this value returned in the header.
 	return fmt.Sprintf("%s%s%s", baseURL, oauthWellKnownProtectedResourceMetadataPath, pathComponent)
@@ -482,9 +482,6 @@ func buildOAuthProtectedResourceMetadataJSON(auth *aigv1a1.MCPRouteOAuth) string
 	}
 	if len(auth.ProtectedResourceMetadata.ScopesSupported) != 0 {
 		response["scopes_supported"] = auth.ProtectedResourceMetadata.ScopesSupported
-	}
-	if auth.ProtectedResourceMetadata.ResourceName != nil && *auth.ProtectedResourceMetadata.ResourceName != "" {
-		response["resource_name"] = auth.ProtectedResourceMetadata.ResourceName
 	}
 	if len(auth.ProtectedResourceMetadata.ResourceSigningAlgValuesSupported) > 0 {
 		response["resource_signing_alg_values_supported"] = auth.ProtectedResourceMetadata.ResourceSigningAlgValuesSupported
