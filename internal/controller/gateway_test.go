@@ -3041,9 +3041,8 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "mcp-route-old", Namespace: gwNamespace, CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour))},
 			Spec: aigv1b1.MCPRouteSpec{
 				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
-					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name: gwapiv1.ObjectName("backendA"),
-					},
+					BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backendA"},
+
 					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include: []string{"toolA"},
 					},
@@ -3054,9 +3053,8 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "mcp-route-new", Namespace: gwNamespace, CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour))},
 			Spec: aigv1b1.MCPRouteSpec{
 				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
-					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name: gwapiv1.ObjectName("backendB"),
-					},
+					BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backendB"},
+
 					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include: []string{"toolB"},
 					},
@@ -3176,9 +3174,8 @@ func Test_mcpConfig_ToolSelectorExclude(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
 			Spec: aigv1b1.MCPRouteSpec{
 				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
-					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name: gwapiv1.ObjectName("backend"),
-					},
+					BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backend"},
+
 					ToolSelector: &aigv1b1.MCPToolFilter{
 						Include:      []string{"toolA"},
 						Exclude:      []string{"toolB"},
@@ -3189,7 +3186,7 @@ func Test_mcpConfig_ToolSelectorExclude(t *testing.T) {
 		},
 	}
 
-	mc, effective := mcpConfig(mcpRoutes)
+	mc, effective := mcpConfig(mcpRoutes, nil)
 	require.True(t, effective)
 	require.NotNil(t, mc)
 	require.Len(t, mc.Routes, 1)
@@ -3201,6 +3198,89 @@ func Test_mcpConfig_ToolSelectorExclude(t *testing.T) {
 	require.Equal(t, []string{"^secret.*"}, ts.ExcludeRegex)
 }
 
+func Test_mcpConfig_MCPBackendMerge(t *testing.T) {
+	renamed := "X-Backend-Auth"
+	routeHeader := "X-Route-Extra"
+	mcpRoutes := []aigv1b1.MCPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{
+					{
+						BackendObjectReference: gwapiv1.BackendObjectReference{
+							Name:  "from-crd",
+							Group: ptr.To(gwapiv1.Group(aigv1b1.GroupName)),
+							Kind:  ptr.To(gwapiv1.Kind(aigv1b1.MCPBackendKind)),
+						},
+						ToolSelector: &aigv1b1.MCPToolFilter{
+							Include: []string{"route-tool"},
+						},
+						ForwardHeaders: []aigv1b1.MCPHeaderForward{
+							{Name: routeHeader},
+						},
+					},
+					{
+						BackendObjectReference: gwapiv1.BackendObjectReference{
+							Name:  "crd-defaults",
+							Group: ptr.To(gwapiv1.Group(aigv1b1.GroupName)),
+							Kind:  ptr.To(gwapiv1.Kind(aigv1b1.MCPBackendKind)),
+						},
+					},
+					{
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: "legacy"},
+						ToolSelector: &aigv1b1.MCPToolFilter{
+							Include: []string{"legacy-tool"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	lookup := func(namespace, name string) (*aigv1b1.MCPBackend, error) {
+		require.Equal(t, "ns", namespace)
+		switch name {
+		case "from-crd":
+			return &aigv1b1.MCPBackend{
+				Spec: aigv1b1.MCPBackendSpec{
+					ToolSelector: &aigv1b1.MCPToolFilter{Include: []string{"crd-tool"}},
+					ForwardHeaders: []aigv1b1.MCPHeaderForward{
+						{Name: "Authorization", BackendHeader: &renamed},
+					},
+				},
+			}, nil
+		case "crd-defaults":
+			return &aigv1b1.MCPBackend{
+				Spec: aigv1b1.MCPBackendSpec{
+					ToolSelector:   &aigv1b1.MCPToolFilter{Include: []string{"default-tool"}},
+					ForwardHeaders: []aigv1b1.MCPHeaderForward{{Name: "X-From-CRD"}},
+				},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected MCPBackend lookup %s/%s", namespace, name)
+		}
+	}
+
+	mc, effective := mcpConfig(mcpRoutes, lookup)
+	require.True(t, effective)
+	require.Len(t, mc.Routes[0].Backends, 3)
+
+	overridden := mc.Routes[0].Backends[0]
+	require.Equal(t, "from-crd", string(overridden.Name))
+	require.Equal(t, []string{"route-tool"}, overridden.ToolSelector.Include)
+	require.Len(t, overridden.ForwardHeaders, 2)
+	require.Equal(t, filterapi.MCPHeaderForward{Name: "Authorization", BackendHeader: "X-Backend-Auth"}, overridden.ForwardHeaders[0])
+	require.Equal(t, filterapi.MCPHeaderForward{Name: "X-Route-Extra"}, overridden.ForwardHeaders[1])
+
+	defaults := mc.Routes[0].Backends[1]
+	require.Equal(t, []string{"default-tool"}, defaults.ToolSelector.Include)
+	require.Equal(t, []filterapi.MCPHeaderForward{{Name: "X-From-CRD"}}, defaults.ForwardHeaders)
+
+	legacy := mc.Routes[0].Backends[2]
+	require.Equal(t, []string{"legacy-tool"}, legacy.ToolSelector.Include)
+	require.Empty(t, legacy.ForwardHeaders)
+}
+
 func Test_mcpConfig_ForwardHeaders(t *testing.T) {
 	renamed := "X-Backend-Auth"
 	mcpRoutes := []aigv1b1.MCPRoute{
@@ -3209,25 +3289,22 @@ func Test_mcpConfig_ForwardHeaders(t *testing.T) {
 			Spec: aigv1b1.MCPRouteSpec{
 				BackendRefs: []aigv1b1.MCPRouteBackendRef{
 					{
-						BackendObjectReference: gwapiv1.BackendObjectReference{
-							Name: gwapiv1.ObjectName("backendA"),
-						},
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backendA"},
+
 						ForwardHeaders: []aigv1b1.MCPHeaderForward{
 							{Name: "X-Api-Key"},
 							{Name: "Authorization", BackendHeader: &renamed},
 						},
 					},
 					{
-						BackendObjectReference: gwapiv1.BackendObjectReference{
-							Name: gwapiv1.ObjectName("backendB"),
-						},
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backendB"},
 					},
 				},
 			},
 		},
 	}
 
-	mc, effective := mcpConfig(mcpRoutes)
+	mc, effective := mcpConfig(mcpRoutes, nil)
 	require.True(t, effective)
 	require.NotNil(t, mc)
 	require.Len(t, mc.Routes, 1)
@@ -3251,13 +3328,13 @@ func Test_mcpConfig_BackendSelector(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
 				Spec: aigv1b1.MCPRouteSpec{
 					BackendRefs: []aigv1b1.MCPRouteBackendRef{{
-						BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backend")},
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backend"},
 					}},
 				},
 			},
 		}
 
-		mc, effective := mcpConfig(mcpRoutes)
+		mc, effective := mcpConfig(mcpRoutes, nil)
 		require.True(t, effective)
 		require.Nil(t, mc.Routes[0].BackendSelector)
 	})
@@ -3268,7 +3345,7 @@ func Test_mcpConfig_BackendSelector(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
 				Spec: aigv1b1.MCPRouteSpec{
 					BackendRefs: []aigv1b1.MCPRouteBackendRef{{
-						BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backend")},
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backend"},
 					}},
 					BackendSelector: &aigv1b1.MCPBackendSelector{
 						DefaultAction: ptr.To(egv1a1.AuthorizationActionDeny),
@@ -3280,7 +3357,7 @@ func Test_mcpConfig_BackendSelector(t *testing.T) {
 			},
 		}
 
-		mc, effective := mcpConfig(mcpRoutes)
+		mc, effective := mcpConfig(mcpRoutes, nil)
 		require.True(t, effective)
 		sel := mc.Routes[0].BackendSelector
 		require.NotNil(t, sel)
@@ -3296,14 +3373,14 @@ func Test_mcpConfig_BackendSelector(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns"},
 				Spec: aigv1b1.MCPRouteSpec{
 					BackendRefs: []aigv1b1.MCPRouteBackendRef{{
-						BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backend")},
+						BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backend"},
 					}},
 					BackendSelector: &aigv1b1.MCPBackendSelector{},
 				},
 			},
 		}
 
-		mc, _ := mcpConfig(mcpRoutes)
+		mc, _ := mcpConfig(mcpRoutes, nil)
 		require.Equal(t, filterapi.AuthorizationActionDeny, mc.Routes[0].BackendSelector.DefaultAction)
 		require.Empty(t, mc.Routes[0].BackendSelector.Rules)
 	})
@@ -3317,7 +3394,7 @@ func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
 				Spec: aigv1b1.MCPRouteSpec{
 					SecurityPolicy: sp,
 					BackendRefs: []aigv1b1.MCPRouteBackendRef{
-						{BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("backendA")}},
+						{BackendObjectReference: gwapiv1.BackendObjectReference{Name: "backendA"}},
 					},
 				},
 			},
@@ -3327,7 +3404,7 @@ func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
 	t.Run("forwards the api-key client-id header to backends", func(t *testing.T) {
 		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
 			APIKeyAuth: &egv1a1.APIKeyAuth{ForwardClientIDHeader: ptr.To("x-mcp-client-id")},
-		}))
+		}), nil)
 		require.True(t, effective)
 		require.Len(t, mc.Routes, 1)
 		// Mirrors the OAuth claim-to-header bridge: the injected caller id must be
@@ -3338,7 +3415,7 @@ func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
 	t.Run("no client-id header configured", func(t *testing.T) {
 		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
 			APIKeyAuth: &egv1a1.APIKeyAuth{},
-		}))
+		}), nil)
 		require.True(t, effective)
 		require.Len(t, mc.Routes, 1)
 		require.Empty(t, mc.Routes[0].ForwardHeaders)
@@ -3347,14 +3424,14 @@ func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
 	t.Run("empty client-id header is ignored", func(t *testing.T) {
 		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
 			APIKeyAuth: &egv1a1.APIKeyAuth{ForwardClientIDHeader: ptr.To("")},
-		}))
+		}), nil)
 		require.True(t, effective)
 		require.Len(t, mc.Routes, 1)
 		require.Empty(t, mc.Routes[0].ForwardHeaders)
 	})
 
 	t.Run("no security policy", func(t *testing.T) {
-		mc, effective := mcpConfig(newRoute(nil))
+		mc, effective := mcpConfig(newRoute(nil), nil)
 		require.True(t, effective)
 		require.Len(t, mc.Routes, 1)
 		require.Empty(t, mc.Routes[0].ForwardHeaders)
@@ -3368,7 +3445,7 @@ func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
 				},
 			},
 			APIKeyAuth: &egv1a1.APIKeyAuth{ForwardClientIDHeader: ptr.To("x-mcp-client-id")},
-		}))
+		}), nil)
 		require.True(t, effective)
 		require.Len(t, mc.Routes, 1)
 		require.Equal(t, []string{"x-mcp-client-id"}, mc.Routes[0].ForwardHeaders)

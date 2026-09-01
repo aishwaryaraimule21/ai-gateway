@@ -15,4 +15,6 @@ type BackendSecurityPolicyExpansion interface{}
 
 type GatewayConfigExpansion interface{}
 
+type MCPBackendExpansion interface{}
+
 type MCPRouteExpansion interface{}

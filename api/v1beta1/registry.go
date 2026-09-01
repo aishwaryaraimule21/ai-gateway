@@ -17,6 +17,7 @@ func init() {
 	SchemeBuilder.Register(&AIServiceBackend{}, &AIServiceBackendList{})
 	SchemeBuilder.Register(&BackendSecurityPolicy{}, &BackendSecurityPolicyList{})
 	SchemeBuilder.Register(&MCPRoute{}, &MCPRouteList{})
+	SchemeBuilder.Register(&MCPBackend{}, &MCPBackendList{})
 	SchemeBuilder.Register(&GatewayConfig{}, &GatewayConfigList{})
 }
 
@@ -49,6 +50,8 @@ func AddKnownTypes(scheme *runtime.Scheme) error {
 		&BackendSecurityPolicyList{},
 		&MCPRoute{},
 		&MCPRouteList{},
+		&MCPBackend{},
+		&MCPBackendList{},
 		&GatewayConfig{},
 		&GatewayConfigList{},
 	)

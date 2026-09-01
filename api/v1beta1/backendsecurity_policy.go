@@ -22,6 +22,10 @@ const (
 	BackendSecurityPolicyTypeAnthropicAPIKey  BackendSecurityPolicyType = "AnthropicAPIKey" // #nosec G101
 	BackendSecurityPolicyTypeAzureCredentials BackendSecurityPolicyType = "AzureCredentials"
 	BackendSecurityPolicyTypeGCPCredentials   BackendSecurityPolicyType = "GCPCredentials"
+	// BackendSecurityPolicyTypeMCPAPIKey is MCP-specific API key injection (header, queryParam, inline).
+	BackendSecurityPolicyTypeMCPAPIKey BackendSecurityPolicyType = "MCPAPIKey"
+	// BackendSecurityPolicyTypeTokenExchange is OAuth 2.0 Token Exchange (RFC-8693) for MCP backends.
+	BackendSecurityPolicyTypeTokenExchange BackendSecurityPolicyType = "TokenExchange"
 )
 
 // BackendSecurityPolicy specifies configuration for authentication and authorization rules on the traffic
@@ -47,25 +51,29 @@ type BackendSecurityPolicy struct {
 //
 // Only one type of BackendSecurityPolicy can be defined.
 // +kubebuilder:validation:MaxProperties=4
-// +kubebuilder:validation:XValidation:rule="self.type == 'APIKey' ? (has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey)) : true",message="When type is APIKey, only apiKey field should be set"
-// +kubebuilder:validation:XValidation:rule="self.type == 'AWSCredentials' ? (has(self.awsCredentials) && !has(self.apiKey) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey)) : true",message="When type is AWSCredentials, only awsCredentials field should be set"
-// +kubebuilder:validation:XValidation:rule="self.type == 'AzureAPIKey' ? (has(self.azureAPIKey) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey)) : true",message="When type is AzureAPIKey, only azureAPIKey field should be set"
-// +kubebuilder:validation:XValidation:rule="self.type == 'AzureCredentials' ? (has(self.azureCredentials) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey)) : true",message="When type is AzureCredentials, only azureCredentials field should be set"
-// +kubebuilder:validation:XValidation:rule="self.type == 'GCPCredentials' ? (has(self.gcpCredentials) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.anthropicAPIKey)) : true",message="When type is GCPCredentials, only gcpCredentials field should be set"
-// +kubebuilder:validation:XValidation:rule="self.type == 'AnthropicAPIKey' ? (has(self.anthropicAPIKey) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials)) : true",message="When type is AnthropicAPIKey, only anthropicAPIKey field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'APIKey' ? (has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey) && !has(self.mcpAPIKey) && !has(self.tokenExchange)) : true",message="When type is APIKey, only apiKey field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'AWSCredentials' ? (has(self.awsCredentials) && !has(self.apiKey) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey) && !has(self.mcpAPIKey) && !has(self.tokenExchange)) : true",message="When type is AWSCredentials, only awsCredentials field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'AzureAPIKey' ? (has(self.azureAPIKey) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey) && !has(self.mcpAPIKey) && !has(self.tokenExchange)) : true",message="When type is AzureAPIKey, only azureAPIKey field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'AzureCredentials' ? (has(self.azureCredentials) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey) && !has(self.mcpAPIKey) && !has(self.tokenExchange)) : true",message="When type is AzureCredentials, only azureCredentials field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'GCPCredentials' ? (has(self.gcpCredentials) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.anthropicAPIKey) && !has(self.mcpAPIKey) && !has(self.tokenExchange)) : true",message="When type is GCPCredentials, only gcpCredentials field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'AnthropicAPIKey' ? (has(self.anthropicAPIKey) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.mcpAPIKey) && !has(self.tokenExchange)) : true",message="When type is AnthropicAPIKey, only anthropicAPIKey field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'MCPAPIKey' ? (has(self.mcpAPIKey) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey) && !has(self.tokenExchange)) : true",message="When type is MCPAPIKey, only mcpAPIKey field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type == 'TokenExchange' ? (has(self.tokenExchange) && !has(self.apiKey) && !has(self.awsCredentials) && !has(self.azureAPIKey) && !has(self.azureCredentials) && !has(self.gcpCredentials) && !has(self.anthropicAPIKey) && !has(self.mcpAPIKey)) : true",message="When type is TokenExchange, only tokenExchange field should be set"
+// +kubebuilder:validation:XValidation:rule="self.type in ['MCPAPIKey', 'TokenExchange'] ? (!has(self.targetRefs) || self.targetRefs.all(ref, ref.group == 'aigateway.envoyproxy.io' && ref.kind == 'MCPBackend')) : true",message="MCPAPIKey and TokenExchange types can only target MCPBackend"
+// +kubebuilder:validation:XValidation:rule="self.type in ['APIKey', 'AWSCredentials', 'AzureAPIKey', 'AzureCredentials', 'GCPCredentials', 'AnthropicAPIKey'] ? (!has(self.targetRefs) || self.targetRefs.all(ref, ref.kind != 'MCPBackend')) : true",message="LLM backend security types cannot target MCPBackend"
 type BackendSecurityPolicySpec struct {
-	// TargetRefs are the names of the AIServiceBackend or InferencePool resources this BackendSecurityPolicy is being attached to.
+	// TargetRefs are the names of the AIServiceBackend, InferencePool, or MCPBackend resources this BackendSecurityPolicy is being attached to.
 	// Attaching multiple BackendSecurityPolicies to the same resource is invalid and will result in an error
 	// during the reconciliation of the resource.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
-	// +kubebuilder:validation:XValidation:rule="self.all(ref, (ref.group == 'aigateway.envoyproxy.io' && ref.kind == 'AIServiceBackend') || (ref.group == 'inference.networking.k8s.io' && ref.kind == 'InferencePool'))", message="targetRefs must reference AIServiceBackend or InferencePool resources"
+	// +kubebuilder:validation:XValidation:rule="self.all(ref, (ref.group == 'aigateway.envoyproxy.io' && ref.kind == 'AIServiceBackend') || (ref.group == 'inference.networking.k8s.io' && ref.kind == 'InferencePool') || (ref.group == 'aigateway.envoyproxy.io' && ref.kind == 'MCPBackend'))", message="targetRefs must reference AIServiceBackend, InferencePool, or MCPBackend"
 	TargetRefs []gwapiv1a2.LocalPolicyTargetReference `json:"targetRefs,omitempty"`
 
 	// Type specifies the type of the backend security policy.
 	//
-	// +kubebuilder:validation:Enum=APIKey;AWSCredentials;AzureAPIKey;AzureCredentials;GCPCredentials;AnthropicAPIKey
+	// +kubebuilder:validation:Enum=APIKey;AWSCredentials;AzureAPIKey;AzureCredentials;GCPCredentials;AnthropicAPIKey;MCPAPIKey;TokenExchange
 	Type BackendSecurityPolicyType `json:"type"`
 
 	// APIKey is a mechanism to access a backend(s). The API key will be injected into the Authorization header.
@@ -98,6 +106,18 @@ type BackendSecurityPolicySpec struct {
 	//
 	// +optional
 	AnthropicAPIKey *BackendSecurityPolicyAnthropicAPIKey `json:"anthropicAPIKey,omitempty"`
+
+	// MCPAPIKey configures MCP-specific API key injection (header, queryParam, inline).
+	// Only valid when Type is MCPAPIKey and TargetRefs point at MCPBackend resources.
+	//
+	// +optional
+	MCPAPIKey *MCPBackendAPIKey `json:"mcpAPIKey,omitempty"`
+
+	// TokenExchange configures OAuth 2.0 Token Exchange (RFC-8693) for MCP backends.
+	// Only valid when Type is TokenExchange and TargetRefs point at MCPBackend resources.
+	//
+	// +optional
+	TokenExchange *MCPBackendTokenExchange `json:"tokenExchange,omitempty"`
 
 	// CredentialOverride, when set, sources the upstream credential per-request instead of using
 	// the static credential configured above.

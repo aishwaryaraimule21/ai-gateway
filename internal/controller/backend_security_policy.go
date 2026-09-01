@@ -37,6 +37,8 @@ const (
 	inferencePoolGroup = "inference.networking.k8s.io"
 	// inferencePoolKind is the kind for InferencePool resources.
 	inferencePoolKind = "InferencePool"
+	// mcpBackendKind is the kind for MCPBackend resources.
+	mcpBackendKind = aigv1b1.MCPBackendKind
 )
 
 const (
@@ -60,15 +62,17 @@ type BackendSecurityPolicyController struct {
 	logger                    logr.Logger
 	aiServiceBackendEventChan chan event.GenericEvent
 	inferencePoolEventChan    chan event.GenericEvent
+	mcpBackendEventChan       chan event.GenericEvent
 }
 
-func NewBackendSecurityPolicyController(client client.Client, kube kubernetes.Interface, logger logr.Logger, aiServiceBackendEventChan chan event.GenericEvent, inferencePoolEventChan chan event.GenericEvent) *BackendSecurityPolicyController {
+func NewBackendSecurityPolicyController(client client.Client, kube kubernetes.Interface, logger logr.Logger, aiServiceBackendEventChan chan event.GenericEvent, inferencePoolEventChan chan event.GenericEvent, mcpBackendEventChan chan event.GenericEvent) *BackendSecurityPolicyController {
 	return &BackendSecurityPolicyController{
 		client:                    client,
 		kube:                      kube,
 		logger:                    logger,
 		aiServiceBackendEventChan: aiServiceBackendEventChan,
 		inferencePoolEventChan:    inferencePoolEventChan,
+		mcpBackendEventChan:       mcpBackendEventChan,
 	}
 }
 
@@ -103,7 +107,9 @@ func (c *BackendSecurityPolicyController) reconcile(ctx context.Context, bsp *ai
 	// Determine if credential rotation is needed
 	requiresRotation := bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAPIKey &&
 		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAzureAPIKey &&
-		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey
+		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey &&
+		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeMCPAPIKey &&
+		bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeTokenExchange
 
 	// Skip rotation for AWS when neither credentials file nor OIDC exchange is configured
 	// This allows IRSA/Pod Identity to work via the default credential chain
@@ -363,6 +369,21 @@ func (c *BackendSecurityPolicyController) syncBackendSecurityPolicy(ctx context.
 			}
 			c.logger.Info("Syncing InferencePool", "namespace", inferencePool.Namespace, "name", inferencePool.Name)
 			c.inferencePoolEventChan <- event.GenericEvent{Object: &inferencePool}
+		case targetRef.Group == aiServiceBackendGroup && targetRef.Kind == mcpBackendKind:
+			var mcpBackend aigv1b1.MCPBackend
+			err := c.client.Get(ctx, client.ObjectKey{
+				Name:      string(targetRef.Name),
+				Namespace: bsp.Namespace, // targetRefs are local to the policy's namespace.
+			}, &mcpBackend)
+			if err != nil {
+				if client.IgnoreNotFound(err) != nil {
+					return fmt.Errorf("failed to get targeted MCPBackend %s: %w", targetRef.Name, err)
+				}
+				c.logger.Info("Targeted MCPBackend not found", "name", string(targetRef.Name), "namespace", bsp.Namespace)
+				continue
+			}
+			c.logger.Info("Syncing MCPBackend", "namespace", mcpBackend.Namespace, "name", mcpBackend.Name)
+			c.mcpBackendEventChan <- event.GenericEvent{Object: &mcpBackend}
 		}
 	}
 
@@ -432,8 +453,10 @@ func getBSPGeneratedSecretName(bsp *aigv1b1.BackendSecurityPolicy) string {
 		}
 	case aigv1b1.BackendSecurityPolicyTypeAPIKey,
 		aigv1b1.BackendSecurityPolicyTypeAzureAPIKey,
-		aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey:
-		return "" // APIKey does not require rotation.
+		aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey,
+		aigv1b1.BackendSecurityPolicyTypeMCPAPIKey,
+		aigv1b1.BackendSecurityPolicyTypeTokenExchange:
+		return "" // APIKey and TokenExchange do not require rotation.
 	default:
 		panic("BUG: unsupported backend security policy type: " + string(bsp.Spec.Type))
 	}

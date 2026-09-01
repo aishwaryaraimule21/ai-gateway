@@ -52,6 +52,12 @@ func TestResource(t *testing.T) {
 			expectedResource: "mcproutes",
 		},
 		{
+			name:             "mcpbackend resource",
+			resource:         "mcpbackends",
+			expectedGroup:    "aigateway.envoyproxy.io",
+			expectedResource: "mcpbackends",
+		},
+		{
 			name:             "gatewayconfig resource",
 			resource:         "gatewayconfigs",
 			expectedGroup:    "aigateway.envoyproxy.io",
@@ -87,6 +93,8 @@ func TestAddKnownTypes(t *testing.T) {
 			"BackendSecurityPolicyList",
 			"MCPRoute",
 			"MCPRouteList",
+			"MCPBackend",
+			"MCPBackendList",
 			"GatewayConfig",
 			"GatewayConfigList",
 		}
@@ -128,6 +136,7 @@ func TestAddToScheme(t *testing.T) {
 		assert.Contains(t, types, "AIServiceBackend")
 		assert.Contains(t, types, "BackendSecurityPolicy")
 		assert.Contains(t, types, "MCPRoute")
+		assert.Contains(t, types, "MCPBackend")
 		assert.Contains(t, types, "GatewayConfig")
 	})
 }

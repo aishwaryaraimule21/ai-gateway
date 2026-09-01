@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -32,7 +33,8 @@ import (
 // Helper: fake client configured for MCP tests with status subresource enabled.
 func requireNewFakeClientWithIndexesForMCP(t *testing.T) client.Client {
 	builder := fake.NewClientBuilder().WithScheme(Scheme).
-		WithStatusSubresource(&aigv1b1.MCPRoute{})
+		WithStatusSubresource(&aigv1b1.MCPRoute{}).
+		WithStatusSubresource(&aigv1b1.MCPBackend{})
 	err := ApplyIndexing(t.Context(), func(_ context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
 		builder = builder.WithIndex(obj, field, extractValue)
 		return nil
@@ -67,14 +69,12 @@ func TestMCPRouteController_Reconcile(t *testing.T) {
 			BackendRefs: []aigv1b1.MCPRouteBackendRef{
 				{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name:      "svc-a",
-						Namespace: ptr.To(gwapiv1.Namespace("default")),
+						Name: "svc-a", Namespace: ptr.To(gwapiv1.Namespace("default")),
 					},
 				},
 				{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name:      "svc-b",
-						Namespace: ptr.To(gwapiv1.Namespace("default")),
+						Name: "svc-b", Namespace: ptr.To(gwapiv1.Namespace("default")),
 					},
 				},
 			},
@@ -129,7 +129,7 @@ func TestMCPRouteController_Reconcile(t *testing.T) {
 	require.Equal(t, route.Spec.Hostnames, mainHTTPRoute.Spec.Hostnames)
 
 	// Verify the two per-backend HTTPRoute created.
-	for _, refName := range []gwapiv1.ObjectName{"svc-a", "svc-b"} {
+	for _, refName := range []string{"svc-a", "svc-b"} {
 		var httpRoute gwapiv1.HTTPRoute
 		err = fakeClient.Get(t.Context(), client.ObjectKey{Name: mcpPerBackendRefHTTPRouteName(route.Name, refName), Namespace: "default"}, &httpRoute)
 		require.NoError(t, err)
@@ -137,11 +137,11 @@ func TestMCPRouteController_Reconcile(t *testing.T) {
 		rule := httpRoute.Spec.Rules[0]
 		require.Equal(t, "/", *rule.Matches[0].Path.Value)
 		require.Len(t, rule.BackendRefs, 1)
-		require.Equal(t, refName, rule.BackendRefs[0].Name)
+		require.Equal(t, gwapiv1.ObjectName(refName), rule.BackendRefs[0].Name)
 		headers := rule.Matches[0].Headers
 		require.Len(t, headers, 2)
 		require.Equal(t, internalapi.MCPBackendHeader, string(headers[0].Name))
-		require.Equal(t, string(refName), headers[0].Value)
+		require.Equal(t, refName, headers[0].Value)
 		require.Equal(t, internalapi.MCPRouteHeader, string(headers[1].Name))
 		require.Equal(t, "default/myroute", headers[1].Value)
 		// Labels/annotations propagated.
@@ -196,6 +196,142 @@ func TestMCPRouteController_Reconcile(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(err), "shared MCP proxy Backend should be deleted after the last MCPRoute is removed")
 }
 
+func TestMCPRouteController_Reconcile_MCPBackendAndLegacy(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForMCP(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	c := NewMCPRouteController(fakeClient, fakekube.NewClientset(), ctrl.Log, eventCh.Ch)
+
+	require.NoError(t, fakeClient.Create(t.Context(), &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "mytarget", Namespace: "default"}}))
+
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.MCPBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-from-crd", Namespace: "default"},
+		Spec: aigv1b1.MCPBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{
+				Name:  "eg-mcp-backend",
+				Kind:  ptr.To(gwapiv1.Kind(aigv1b1.EGBackendKind)),
+				Group: ptr.To(gwapiv1.Group(aigv1b1.EGBackendGroup)),
+			},
+			Path: ptr.To("/custom-mcp"),
+		},
+	}))
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-from-crd-bsp", Namespace: "default"},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type: aigv1b1.BackendSecurityPolicyTypeMCPAPIKey,
+			MCPAPIKey: &aigv1b1.MCPBackendAPIKey{
+				Inline: ptr.To("crd-api-key"),
+			},
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{
+				Group: aigv1b1.GroupName,
+				Kind:  aigv1b1.MCPBackendKind,
+				Name:  "mcp-from-crd",
+			}},
+		},
+	}))
+
+	route := &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mixed-route", Namespace: "default"},
+		Spec: aigv1b1.MCPRouteSpec{
+			ParentRefs: []gwapiv1.ParentReference{{Name: "mytarget"}},
+			BackendRefs: []aigv1b1.MCPRouteBackendRef{
+				{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name:  "mcp-from-crd",
+						Group: ptr.To(gwapiv1.Group(aigv1b1.GroupName)),
+						Kind:  ptr.To(gwapiv1.Kind(aigv1b1.MCPBackendKind)),
+					},
+				},
+				{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name: "mcp-legacy", Port: ptr.To[gwapiv1.PortNumber](1063),
+					},
+					SecurityPolicy: &aigv1b1.MCPBackendSecurityPolicy{
+						APIKey: &aigv1b1.MCPBackendAPIKey{Inline: ptr.To("legacy-api-key")},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), route))
+
+	_, err := c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "mixed-route"}})
+	require.NoError(t, err)
+
+	var crdHTTPRoute gwapiv1.HTTPRoute
+	err = fakeClient.Get(t.Context(), client.ObjectKey{Name: mcpPerBackendRefHTTPRouteName(route.Name, "mcp-from-crd"), Namespace: "default"}, &crdHTTPRoute)
+	require.NoError(t, err)
+	require.Len(t, crdHTTPRoute.Spec.Rules, 1)
+	crdRule := crdHTTPRoute.Spec.Rules[0]
+	require.Len(t, crdRule.BackendRefs, 1)
+	require.Equal(t, gwapiv1.ObjectName("eg-mcp-backend"), crdRule.BackendRefs[0].Name)
+	require.Equal(t, ptr.To(gwapiv1.Kind(aigv1b1.EGBackendKind)), crdRule.BackendRefs[0].Kind)
+	require.Equal(t, ptr.To(gwapiv1.Group(aigv1b1.EGBackendGroup)), crdRule.BackendRefs[0].Group)
+	require.Equal(t, internalapi.MCPBackendHeader, string(crdRule.Matches[0].Headers[0].Name))
+	require.Equal(t, "mcp-from-crd", crdRule.Matches[0].Headers[0].Value)
+	require.Equal(t, "default/mixed-route", crdRule.Matches[0].Headers[1].Value)
+
+	var foundCRDKey bool
+	for _, f := range crdRule.Filters {
+		if f.RequestHeaderModifier == nil {
+			continue
+		}
+		for _, h := range f.RequestHeaderModifier.Set {
+			if h.Name == "Authorization" && h.Value == "Bearer crd-api-key" {
+				foundCRDKey = true
+			}
+		}
+	}
+	require.True(t, foundCRDKey, "MCPBackend HTTPRoute should inject the BSP API key")
+
+	pathRewrite := crdRule.Filters[len(crdRule.Filters)-1]
+	require.Equal(t, gwapiv1.HTTPRouteFilterURLRewrite, pathRewrite.Type)
+	require.Equal(t, "/custom-mcp", *pathRewrite.URLRewrite.Path.ReplaceFullPath)
+
+	var legacyHTTPRoute gwapiv1.HTTPRoute
+	err = fakeClient.Get(t.Context(), client.ObjectKey{Name: mcpPerBackendRefHTTPRouteName(route.Name, "mcp-legacy"), Namespace: "default"}, &legacyHTTPRoute)
+	require.NoError(t, err)
+	legacyRule := legacyHTTPRoute.Spec.Rules[0]
+	require.Equal(t, gwapiv1.ObjectName("mcp-legacy"), legacyRule.BackendRefs[0].Name)
+	require.Nil(t, legacyRule.BackendRefs[0].Kind)
+	require.Equal(t, "mcp-legacy", legacyRule.Matches[0].Headers[0].Value)
+	var foundLegacyKey bool
+	for _, f := range legacyRule.Filters {
+		if f.RequestHeaderModifier == nil {
+			continue
+		}
+		for _, h := range f.RequestHeaderModifier.Set {
+			if h.Name == "Authorization" && h.Value == "Bearer legacy-api-key" {
+				foundLegacyKey = true
+			}
+		}
+	}
+	require.True(t, foundLegacyKey, "legacy HTTPRoute should inject the inline API key")
+}
+
+func TestMCPRouteController_Reconcile_MCPBackendMissing(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForMCP(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	c := NewMCPRouteController(fakeClient, fakekube.NewClientset(), ctrl.Log, eventCh.Ch)
+
+	require.NoError(t, fakeClient.Create(t.Context(), &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "mytarget", Namespace: "default"}}))
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-backend-route", Namespace: "default"},
+		Spec: aigv1b1.MCPRouteSpec{
+			ParentRefs: []gwapiv1.ParentReference{{Name: "mytarget"}},
+			BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+				BackendObjectReference: gwapiv1.BackendObjectReference{
+					Name:  "does-not-exist",
+					Group: ptr.To(gwapiv1.Group(aigv1b1.GroupName)),
+					Kind:  ptr.To(gwapiv1.Kind(aigv1b1.MCPBackendKind)),
+				},
+			}},
+		},
+	}))
+
+	_, err := c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "missing-backend-route"}})
+	require.ErrorContains(t, err, "failed to get MCPBackend default/does-not-exist")
+}
+
 // TestMCPRouteController_SharedBackendPerNamespace verifies that all MCPRoutes in a namespace —
 // including one attached to multiple Gateways — share a single mcp-proxy Backend, and that the
 // Backend is removed only once the last MCPRoute in the namespace is gone.
@@ -217,10 +353,8 @@ func TestMCPRouteController_SharedBackendPerNamespace(t *testing.T) {
 		return &aigv1b1.MCPRoute{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec: aigv1b1.MCPRouteSpec{
-				ParentRefs: refs,
-				BackendRefs: []aigv1b1.MCPRouteBackendRef{{BackendObjectReference: gwapiv1.BackendObjectReference{
-					Name: gwapiv1.ObjectName("svc-" + name), Namespace: ptr.To(gwapiv1.Namespace("default")),
-				}}},
+				ParentRefs:  refs,
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("svc-" + name), Namespace: ptr.To(gwapiv1.Namespace("default"))}}},
 			},
 		}
 	}
@@ -552,9 +686,9 @@ func TestMCPRouteController_mcpRuleWithAPIKeyBackendSecurity(t *testing.T) {
 				mcpRoute,
 				&aigv1b1.MCPRouteBackendRef{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name:      "svc-a",
-						Namespace: ptr.To(gwapiv1.Namespace("default")),
+						Name: "svc-a", Namespace: ptr.To(gwapiv1.Namespace("default")),
 					},
+
 					SecurityPolicy: &aigv1b1.MCPBackendSecurityPolicy{APIKey: tt.key},
 					Path:           tt.refPath,
 				},
@@ -655,9 +789,9 @@ func TestMCPRouteController_staleCredentialSecretCleanup(t *testing.T) {
 	mcpRoute := &aigv1b1.MCPRoute{ObjectMeta: metav1.ObjectMeta{Name: "route-cleanup", Namespace: "default"}}
 	backendRef := &aigv1b1.MCPRouteBackendRef{
 		BackendObjectReference: gwapiv1.BackendObjectReference{
-			Name:      "svc-b",
-			Namespace: ptr.To(gwapiv1.Namespace("default")),
+			Name: "svc-b", Namespace: ptr.To(gwapiv1.Namespace("default")),
 		},
+
 		SecurityPolicy: &aigv1b1.MCPBackendSecurityPolicy{
 			APIKey: &aigv1b1.MCPBackendAPIKey{SecretRef: &gwapiv1.SecretObjectReference{Name: "api-secret"}},
 		},
@@ -929,8 +1063,7 @@ func TestMCPRouteController_Reconcile_GatewayNotFound(t *testing.T) {
 			BackendRefs: []aigv1b1.MCPRouteBackendRef{
 				{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name:      "svc-a",
-						Namespace: ptr.To(gwapiv1.Namespace("default")),
+						Name: "svc-a", Namespace: ptr.To(gwapiv1.Namespace("default")),
 					},
 				},
 			},
@@ -987,8 +1120,7 @@ func TestMCPRouteController_Reconcile_DeletionWithMissingGateway(t *testing.T) {
 			BackendRefs: []aigv1b1.MCPRouteBackendRef{
 				{
 					BackendObjectReference: gwapiv1.BackendObjectReference{
-						Name:      "svc-a",
-						Namespace: ptr.To(gwapiv1.Namespace("default")),
+						Name: "svc-a", Namespace: ptr.To(gwapiv1.Namespace("default")),
 					},
 				},
 			},

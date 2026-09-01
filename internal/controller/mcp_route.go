@@ -131,7 +131,7 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	// This allows the MCP proxy to route requests to the correct backend based on the header.
 	for i := range mcpRoute.Spec.BackendRefs {
 		ref := &mcpRoute.Spec.BackendRefs[i]
-		name := mcpPerBackendRefHTTPRouteName(mcpRoute.Name, ref.Name)
+		name := mcpPerBackendRefHTTPRouteName(mcpRoute.Name, string(ref.Name))
 		httpRoute, existing := existingPerBackendRoutes[name]
 		if !existing {
 			httpRoute, err = c.newHTTPRoute(mcpRoute, name)
@@ -164,7 +164,7 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	return nil
 }
 
-func mcpPerBackendRefHTTPRouteName(mcpRouteName string, backendName gwapiv1.ObjectName) string {
+func mcpPerBackendRefHTTPRouteName(mcpRouteName string, backendName string) string {
 	return fmt.Sprintf("%s%s-%s", internalapi.MCPPerBackendRefHTTPRoutePrefix, mcpRouteName, backendName)
 }
 
@@ -447,10 +447,12 @@ func copyMCPRouteMetadataToHTTPRoute(dst *gwapiv1.HTTPRoute, mcpRoute *aigv1b1.M
 
 // newPerBackendRefHTTPRoute creates an HTTPRoute for each backend reference in the MCPRoute.
 func (c *MCPRouteController) newPerBackendRefHTTPRoute(ctx context.Context, dst *gwapiv1.HTTPRoute, mcpRoute *aigv1b1.MCPRoute, ref *aigv1b1.MCPRouteBackendRef) error {
-	if ns := ref.Namespace; ns != nil && *ns != gwapiv1.Namespace(mcpRoute.Namespace) {
-		// TODO: do this in a CEL or webhook validation or start supporting cross-namespace references with ReferenceGrant.
-		return fmt.Errorf("cross-namespace backend reference is not supported: backend %s/%s in MCPRoute %s/%s",
-			*ns, ref.Name, mcpRoute.Namespace, mcpRoute.Name)
+	if !ref.IsMCPBackend() {
+		if ns := ref.Namespace; ns != nil && *ns != gwapiv1.Namespace(mcpRoute.Namespace) {
+			// TODO: do this in a CEL or webhook validation or start supporting cross-namespace references with ReferenceGrant.
+			return fmt.Errorf("cross-namespace backend reference is not supported: backend %s/%s in MCPRoute %s/%s",
+				*ns, ref.Name, mcpRoute.Namespace, mcpRoute.Name)
+		}
 	}
 	mcpBackendToHTTPRouteRule, err := c.mcpBackendRefToHTTPRouteRule(ctx, mcpRoute, ref)
 	if err != nil {
@@ -641,12 +643,91 @@ func (c *MCPRouteController) deleteOldMCPRouteBackend(ctx context.Context, mcpRo
 	}
 }
 
-func mcpBackendRefFilterName(mcpRoute *aigv1b1.MCPRoute, backendName gwapiv1.ObjectName) string {
+func mcpBackendRefFilterName(mcpRoute *aigv1b1.MCPRoute, backendName string) string {
 	return fmt.Sprintf("%s%s-%s", internalapi.MCPPerBackendHTTPRouteFilterPrefix, mcpRoute.Name, backendName)
 }
 
-func mcpCredentialSecretName(mcpRoute *aigv1b1.MCPRoute, backendName gwapiv1.ObjectName) string {
+func mcpCredentialSecretName(mcpRoute *aigv1b1.MCPRoute, backendName string) string {
 	return fmt.Sprintf("%s%s-%s", internalapi.MCPPerBackendCredentialSecretPrefix, mcpRoute.Name, backendName)
+}
+
+// resolvedMCPBackendRef is the effective backend used to generate an HTTPRouteRule,
+// after resolving an MCPBackend CRD and merging per-route overrides.
+type resolvedMCPBackendRef struct {
+	// name is the routing identifier written into MCPBackendHeader.
+	name string
+	// backendRef is the Envoy Gateway Backend or Kubernetes Service to route to.
+	backendRef gwapiv1.BackendObjectReference
+	path       *string
+	apiKey     *aigv1b1.MCPBackendAPIKey
+}
+
+func (c *MCPRouteController) resolveMCPRouteBackendRef(ctx context.Context, mcpRoute *aigv1b1.MCPRoute, ref *aigv1b1.MCPRouteBackendRef) (*resolvedMCPBackendRef, error) {
+	if !ref.IsMCPBackend() {
+		var apiKey *aigv1b1.MCPBackendAPIKey
+		if ref.SecurityPolicy != nil {
+			apiKey = ref.SecurityPolicy.APIKey
+		}
+		return &resolvedMCPBackendRef{
+			name:       string(ref.Name),
+			backendRef: ref.BackendObjectReference,
+			path:       ref.Path,
+			apiKey:     apiKey,
+		}, nil
+	}
+
+	var mcpBackend aigv1b1.MCPBackend
+	if err := c.client.Get(ctx, client.ObjectKey{Name: string(ref.Name), Namespace: mcpRoute.Namespace}, &mcpBackend); err != nil {
+		return nil, fmt.Errorf("failed to get MCPBackend %s/%s: %w", mcpRoute.Namespace, ref.Name, err)
+	}
+	if ns := mcpBackend.Spec.BackendRef.Namespace; ns != nil && *ns != gwapiv1.Namespace(mcpRoute.Namespace) {
+		return nil, fmt.Errorf("cross-namespace backend reference is not supported: backend %s/%s in MCPBackend %s/%s",
+			*ns, mcpBackend.Spec.BackendRef.Name, mcpBackend.Namespace, mcpBackend.Name)
+	}
+
+	apiKey, err := c.mcpBackendAPIKeyFromBSP(ctx, &mcpBackend)
+	if err != nil {
+		return nil, err
+	}
+
+	return &resolvedMCPBackendRef{
+		name:       string(ref.Name),
+		backendRef: mcpBackend.Spec.BackendRef,
+		path:       mcpBackend.Spec.Path,
+		apiKey:     apiKey,
+	}, nil
+}
+
+func (c *MCPRouteController) mcpBackendAPIKeyFromBSP(ctx context.Context, mcpBackend *aigv1b1.MCPBackend) (*aigv1b1.MCPBackendAPIKey, error) {
+	var bspList aigv1b1.BackendSecurityPolicyList
+	key := fmt.Sprintf("%s.%s", mcpBackend.Name, mcpBackend.Namespace)
+	if err := c.client.List(ctx, &bspList, client.InNamespace(mcpBackend.Namespace),
+		client.MatchingFields{k8sClientIndexMCPBackendToTargetingBackendSecurityPolicy: key}); err != nil {
+		return nil, fmt.Errorf("failed to list BackendSecurityPolicies for MCPBackend %s: %w", mcpBackend.Name, err)
+	}
+	if len(bspList.Items) == 0 {
+		return nil, nil
+	}
+	if len(bspList.Items) > 1 {
+		var names []string
+		for i := range bspList.Items {
+			names = append(names, bspList.Items[i].Name)
+		}
+		return nil, fmt.Errorf("multiple BackendSecurityPolicies found for MCPBackend %s: %v", mcpBackend.Name, names)
+	}
+	bsp := &bspList.Items[0]
+	switch bsp.Spec.Type {
+	case aigv1b1.BackendSecurityPolicyTypeMCPAPIKey:
+		return bsp.Spec.MCPAPIKey, nil
+	case aigv1b1.BackendSecurityPolicyTypeTokenExchange:
+		// Token exchange runtime is not implemented yet; HTTPRoute generation continues without credential injection.
+		c.logger.Info("TokenExchange BackendSecurityPolicy is configured but not yet implemented; skipping credential injection",
+			"namespace", bsp.Namespace, "name", bsp.Name, "mcpBackend", mcpBackend.Name)
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("BackendSecurityPolicy %s targeting MCPBackend %s has unsupported type %s",
+			bsp.Name, mcpBackend.Name, bsp.Spec.Type)
+	}
 }
 
 // mcpBackendRefToHTTPRouteRule creates a HTTPRouteRule for the given MCPRouteBackendRef.
@@ -654,7 +735,11 @@ func mcpCredentialSecretName(mcpRoute *aigv1b1.MCPRoute, backendName gwapiv1.Obj
 // which is set by the MCP proxy based on its routing logic.
 // This route rule will eventually be moved to the backend listener in the extension server.
 func (c *MCPRouteController) mcpBackendRefToHTTPRouteRule(ctx context.Context, mcpRoute *aigv1b1.MCPRoute, ref *aigv1b1.MCPRouteBackendRef) (gwapiv1.HTTPRouteRule, error) {
-	egFilterName := mcpBackendRefFilterName(mcpRoute, ref.Name)
+	resolved, err := c.resolveMCPRouteBackendRef(ctx, mcpRoute, ref)
+	if err != nil {
+		return gwapiv1.HTTPRouteRule{}, err
+	}
+	egFilterName := mcpBackendRefFilterName(mcpRoute, resolved.name)
 
 	// Determine credential handling from the backend's security policy.
 	// - inline API keys: use RequestHeaderModifier (no security benefit from a Secret since
@@ -665,24 +750,25 @@ func (c *MCPRouteController) mcpBackendRefToHTTPRouteRule(ctx context.Context, m
 	var credentialSecretName string
 	var credentialHeader *string
 	var inlineHeaderFilter *gwapiv1.HTTPRouteFilter
-	fullPathPtr := ptr.Deref(ref.Path, defaultMCPPath)
+	fullPathPtr := ptr.Deref(resolved.path, defaultMCPPath)
 
-	if ref.SecurityPolicy != nil && ref.SecurityPolicy.APIKey != nil {
-		apiKey := ref.SecurityPolicy.APIKey
+	if resolved.apiKey != nil {
+		apiKey := resolved.apiKey
 
 		switch {
 		case apiKey.QueryParam != nil:
 			// Query parameter injection cannot use Envoy Gateway's credentialInjection filter;
 			// embed directly in the URL rewrite path.
 			// TODO: evaluate alternatives to avoid embedding the secret in the HTTPRoute manifest.
-			apiKeyLiteral, err := c.readAPIKey(ctx, mcpRoute.Namespace, apiKey)
-			if err != nil {
-				return gwapiv1.HTTPRouteRule{}, fmt.Errorf("failed to read API key for backend %s: %w", ref.Name, err)
+			apiKeyLiteral, readErr := c.readAPIKey(ctx, mcpRoute.Namespace, apiKey)
+			if readErr != nil {
+				return gwapiv1.HTTPRouteRule{}, fmt.Errorf("failed to read API key for backend %s: %w", resolved.name, readErr)
 			}
 			fullPathPtr = fmt.Sprintf("%s?%s=%s", fullPathPtr, *apiKey.QueryParam, apiKeyLiteral)
 		case apiKey.Inline != nil:
 			// Inline API key: inject via RequestHeaderModifier directly. The value is already
-			// visible in the MCPRoute manifest, so a separate Secret adds no security benefit.
+			// visible in the MCPRoute/MCPBackendSecurityPolicy manifest, so a separate Secret
+			// adds no security benefit.
 			header := ptr.Deref(apiKey.Header, "Authorization")
 			value := *apiKey.Inline
 			if header == "Authorization" {
@@ -699,9 +785,9 @@ func (c *MCPRouteController) mcpBackendRefToHTTPRouteRule(ctx context.Context, m
 		case apiKey.SecretRef != nil:
 			// SecretRef API key: create a managed credential Secret and use the
 			// HTTPRouteFilter's credentialInjection to keep plaintext out of non-Secret resources.
-			credSecretName := mcpCredentialSecretName(mcpRoute, ref.Name)
-			if err := c.ensureCredentialSecret(ctx, credSecretName, mcpRoute, apiKey); err != nil {
-				return gwapiv1.HTTPRouteRule{}, fmt.Errorf("failed to ensure credential secret for backend %s: %w", ref.Name, err)
+			credSecretName := mcpCredentialSecretName(mcpRoute, resolved.name)
+			if ensureErr := c.ensureCredentialSecret(ctx, credSecretName, mcpRoute, apiKey); ensureErr != nil {
+				return gwapiv1.HTTPRouteRule{}, fmt.Errorf("failed to ensure credential secret for backend %s: %w", resolved.name, ensureErr)
 			}
 			credentialSecretName = credSecretName
 			credentialHeader = apiKey.Header
@@ -709,7 +795,7 @@ func (c *MCPRouteController) mcpBackendRefToHTTPRouteRule(ctx context.Context, m
 	}
 
 	// Ensure the HTTPRouteFilter for this backend with URL rewrite and optional credential injection.
-	if err := c.ensureMCPBackendRefHTTPFilter(ctx, egFilterName, mcpRoute, credentialSecretName, credentialHeader); err != nil {
+	if err = c.ensureMCPBackendRefHTTPFilter(ctx, egFilterName, mcpRoute, credentialSecretName, credentialHeader); err != nil {
 		return gwapiv1.HTTPRouteRule{}, fmt.Errorf("failed to ensure MCP backend HTTP filter: %w", err)
 	}
 
@@ -741,7 +827,7 @@ func (c *MCPRouteController) mcpBackendRefToHTTPRouteRule(ctx context.Context, m
 			{
 				Path: &gwapiv1.HTTPPathMatch{Type: ptr.To(gwapiv1.PathMatchPathPrefix), Value: ptr.To("/")},
 				Headers: []gwapiv1.HTTPHeaderMatch{
-					{Name: internalapi.MCPBackendHeader, Value: string(ref.Name)},
+					{Name: internalapi.MCPBackendHeader, Value: resolved.name},
 					{Name: internalapi.MCPRouteHeader, Value: mcpRouteHeaderValue(mcpRoute)},
 				},
 			},
@@ -749,13 +835,7 @@ func (c *MCPRouteController) mcpBackendRefToHTTPRouteRule(ctx context.Context, m
 		Filters: filters,
 		BackendRefs: []gwapiv1.HTTPBackendRef{{
 			BackendRef: gwapiv1.BackendRef{
-				BackendObjectReference: gwapiv1.BackendObjectReference{
-					Group:     ref.Group,
-					Kind:      ref.Kind,
-					Name:      ref.Name,
-					Namespace: ref.Namespace,
-					Port:      ref.Port,
-				},
+				BackendObjectReference: resolved.backendRef,
 			},
 		}},
 		Timeouts: &gwapiv1.HTTPRouteTimeouts{

@@ -21,6 +21,8 @@ type Interface interface {
 	BackendSecurityPolicies() BackendSecurityPolicyInformer
 	// GatewayConfigs returns a GatewayConfigInformer.
 	GatewayConfigs() GatewayConfigInformer
+	// MCPBackends returns a MCPBackendInformer.
+	MCPBackends() MCPBackendInformer
 	// MCPRoutes returns a MCPRouteInformer.
 	MCPRoutes() MCPRouteInformer
 }
@@ -54,6 +56,11 @@ func (v *version) BackendSecurityPolicies() BackendSecurityPolicyInformer {
 // GatewayConfigs returns a GatewayConfigInformer.
 func (v *version) GatewayConfigs() GatewayConfigInformer {
 	return &gatewayConfigInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// MCPBackends returns a MCPBackendInformer.
+func (v *version) MCPBackends() MCPBackendInformer {
+	return &mCPBackendInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // MCPRoutes returns a MCPRouteInformer.

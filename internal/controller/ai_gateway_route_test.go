@@ -109,7 +109,8 @@ func requireNewFakeClientWithIndexes(t *testing.T) client.Client {
 	builder := fake.NewClientBuilder().WithScheme(Scheme).
 		WithStatusSubresource(&aigv1b1.AIGatewayRoute{}).
 		WithStatusSubresource(&aigv1b1.AIServiceBackend{}).
-		WithStatusSubresource(&aigv1b1.BackendSecurityPolicy{})
+		WithStatusSubresource(&aigv1b1.BackendSecurityPolicy{}).
+		WithStatusSubresource(&aigv1b1.MCPBackend{})
 	err := ApplyIndexing(t.Context(), func(_ context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
 		builder = builder.WithIndex(obj, field, extractValue)
 		return nil

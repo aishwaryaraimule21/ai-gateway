@@ -202,11 +202,21 @@ func TestBackendSecurityPolicies(t *testing.T) {
 		{name: "targetrefs_mixed.yaml"},
 		{
 			name:   "targetrefs_invalid_kind.yaml",
-			expErr: "targetRefs must reference AIServiceBackend or InferencePool resources",
+			expErr: "targetRefs must reference AIServiceBackend, InferencePool, or MCPBackend",
 		},
 		{
 			name:   "targetrefs_invalid_group.yaml",
-			expErr: "targetRefs must reference AIServiceBackend or InferencePool resources",
+			expErr: "targetRefs must reference AIServiceBackend, InferencePool, or MCPBackend",
+		},
+		{name: "targetrefs_mcpbackend.yaml"},
+		{name: "tokenexchange_targets_mcpbackend.yaml"},
+		{
+			name:   "mcpapikey_targets_aisb.yaml",
+			expErr: "MCPAPIKey and TokenExchange types can only target MCPBackend",
+		},
+		{
+			name:   "apikey_targets_mcpbackend.yaml",
+			expErr: "LLM backend security types cannot target MCPBackend",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,6 +302,24 @@ func TestMCPRoutes(t *testing.T) {
 			expErr: "spec.securityPolicy.authorization.rules[0].source.jwt: Invalid value: \"object\": either scopes or claims must be specified",
 		},
 		{name: "authorization_without_jwt_source.yaml"},
+		{name: "mcpbackend_ref.yaml"},
+		{name: "mcpbackend_mixed.yaml"},
+		{
+			name:   "mcpbackend_with_path.yaml",
+			expErr: "path, port, and namespace are not valid for MCPBackend references",
+		},
+		{
+			name:   "mcpbackend_apikey_override.yaml",
+			expErr: "in MCPBackend mode, securityPolicy may only contain tokenExchange overrides",
+		},
+		{
+			name:   "mcpbackend_missing_group.yaml",
+			expErr: "MCPBackend references must set group to aigateway.envoyproxy.io",
+		},
+		{
+			name:   "mcpbackend_token_exchange_sts_override.yaml",
+			expErr: "in MCPBackend mode, only tokenExchange.scopes is allowed as override",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/mcpgatewayroutes", tc.name))
@@ -306,6 +334,38 @@ func TestMCPRoutes(t *testing.T) {
 			} else {
 				require.NoError(t, c.Create(ctx, mcpRoute))
 				require.NoError(t, c.Delete(ctx, mcpRoute))
+			}
+		})
+	}
+}
+
+func TestMCPBackends(t *testing.T) {
+	c, _, _ := testsinternal.NewEnvTest(t)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name   string
+		expErr string
+	}{
+		{name: "basic.yaml"},
+		{
+			name:   "k8s-svc.yaml",
+			expErr: "must reference an Envoy Gateway Backend",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := testdata.ReadFile(path.Join("testdata/mcpbackends", tc.name))
+			require.NoError(t, err)
+
+			mcpBackend := &aigv1b1.MCPBackend{}
+			err = yaml.UnmarshalStrict(data, mcpBackend)
+			require.NoError(t, err)
+
+			if tc.expErr != "" {
+				require.ErrorContains(t, c.Create(ctx, mcpBackend), tc.expErr)
+			} else {
+				require.NoError(t, c.Create(ctx, mcpBackend))
+				require.NoError(t, c.Delete(ctx, mcpBackend))
 			}
 		})
 	}

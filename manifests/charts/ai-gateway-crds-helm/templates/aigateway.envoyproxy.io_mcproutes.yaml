@@ -66,7 +66,7 @@ spec:
                   Also, cross-namespace references are not supported. In other words, the backend MCP servers must be in the
                   same namespace as the MCPRoute.
                 items:
-                  description: MCPRouteBackendRef wraps a EG's BackendObjectReference
+                  description: MCPRouteBackendRef wraps an EG BackendObjectReference
                     to reference an MCP server.
                   properties:
                     forwardHeaders:
@@ -84,11 +84,13 @@ spec:
                             description: |-
                               BackendHeader is the header name to use when forwarding to the backend.
                               If not specified, the original header name is used.
+                            maxLength: 256
                             minLength: 1
                             type: string
                           name:
                             description: Name is the header name to extract from the
                               incoming client request.
+                            maxLength: 256
                             minLength: 1
                             type: string
                         required:
@@ -146,10 +148,11 @@ spec:
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     path:
-                      default: /mcp
                       description: |-
                         Path is the HTTP endpoint path of the backend MCP server.
-                        If not specified, the default is "/mcp".
+                        If not specified, the controller uses "/mcp". Not defaulted in the CRD so that the
+                        stored representation stays consistent with v1beta1 (which cannot default this field
+                        without tripping the MCPBackend path-forbidden validation).
                       maxLength: 1024
                       type: string
                     port:
@@ -179,6 +182,7 @@ spec:
                                 prefixed with "Bearer ".
 
                                 Either one of Header or QueryParam can be specified to inject the API key.
+                              maxLength: 256
                               minLength: 1
                               type: string
                             inline:
@@ -192,6 +196,7 @@ spec:
                                 "?api_key=mysecretkey".
 
                                 Either one of Header or QueryParam can be specified to inject the API key.
+                              maxLength: 256
                               minLength: 1
                               type: string
                             secretRef:
@@ -257,6 +262,7 @@ spec:
                             Exclude is a list of tool names to exclude. The specified tools will not be available.
                             Exclude rules take precedence over include rules.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -265,6 +271,7 @@ spec:
                             ExcludeRegex is a list of RE2-compatible regular expressions that, when matched, exclude the tool.
                             Tools matching these patterns will not be available. Exclude rules take precedence over include rules.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -272,6 +279,7 @@ spec:
                           description: Include is a list of tool names to include.
                             Only the specified tools will be available.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -280,6 +288,7 @@ spec:
                             IncludeRegex is a list of RE2-compatible regular expressions that, when matched, include the tool.
                             Only tools matching these patterns will be available.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -5707,13 +5716,20 @@ spec:
                   Also, cross-namespace references are not supported. In other words, the backend MCP servers must be in the
                   same namespace as the MCPRoute.
                 items:
-                  description: MCPRouteBackendRef wraps a EG's BackendObjectReference
-                    to reference an MCP server.
+                  description: |-
+                    MCPRouteBackendRef references either an inline backend (legacy) or an MCPBackend resource.
+                    Format detection via kind/group:
+                      - omitted kind/group, kind: Service, or kind: Backend + group: gateway.envoyproxy.io → legacy inline mode.
+                      - kind: MCPBackend + group: aigateway.envoyproxy.io → MCPBackend reference mode.
+
+                    BackendObjectReference is embedded to preserve the Go composite-literal API used by
+                    existing clients. Its JSON field names remain name, group, kind, port, and namespace.
                   properties:
                     forwardHeaders:
                       description: |-
                         ForwardHeaders specifies HTTP headers to extract from the incoming client request
                         and forward to this backend MCP server.
+                        Legacy mode: primary definition. MCPBackend mode: per-route override (extends MCPBackend.spec.forwardHeaders).
                         This enables per-user authentication passthrough (e.g., personal access tokens)
                         without requiring OAuth configuration.
                         Each entry specifies a header name to extract and an optional rename for the backend.
@@ -5725,11 +5741,13 @@ spec:
                             description: |-
                               BackendHeader is the header name to use when forwarding to the backend.
                               If not specified, the original header name is used.
+                            maxLength: 256
                             minLength: 1
                             type: string
                           name:
                             description: Name is the header name to extract from the
                               incoming client request.
+                            maxLength: 256
                             minLength: 1
                             type: string
                         required:
@@ -5787,9 +5805,9 @@ spec:
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     path:
-                      default: /mcp
                       description: |-
                         Path is the HTTP endpoint path of the backend MCP server.
+                        Only valid for kind: Backend or Service. Use MCPBackend.spec.path instead for MCPBackend references.
                         If not specified, the default is "/mcp".
                       maxLength: 1024
                       type: string
@@ -5805,8 +5823,13 @@ spec:
                       minimum: 1
                       type: integer
                     securityPolicy:
-                      description: SecurityPolicy is the security policy to apply
-                        to this MCP server.
+                      description: |-
+                        SecurityPolicy defines security configuration for this backend reference.
+                        Legacy mode (kind: Backend or Service): full security policy definition (API key or token exchange).
+                        MCPBackend mode (kind: MCPBackend): per-route override. Only override-able fields are
+                        allowed — specifically tokenExchange.scopes to narrow scopes for this route.
+                        The scopes must be a subset of those configured in the BackendSecurityPolicy's
+                        tokenExchange.scopes targeting this MCPBackend.
                       properties:
                         apiKey:
                           description: APIKey is a mechanism to access a backend.
@@ -5820,6 +5843,7 @@ spec:
                                 prefixed with "Bearer ".
 
                                 Either one of Header or QueryParam can be specified to inject the API key.
+                              maxLength: 256
                               minLength: 1
                               type: string
                             inline:
@@ -5836,6 +5860,7 @@ spec:
 
                                 Note: Embedding credentials in URLs (including query parameters) is generally not recommended because URLs can be exposed in logs
                                 and intermediary systems; prefer header-based injection when possible.
+                              maxLength: 256
                               minLength: 1
                               type: string
                             secretRef:
@@ -5889,10 +5914,292 @@ spec:
                               && has(self.inline))
                           - message: only one of header or queryParam can be set
                             rule: '!(has(self.header) && has(self.queryParam))'
+                        tokenExchange:
+                          description: |-
+                            TokenExchange configures OAuth 2.0 Token Exchange (RFC-8693) as the upstream auth method,
+                            or a per-route override of tokenExchange.scopes when the backendRef kind is MCPBackend.
+                          properties:
+                            actorToken:
+                              description: |-
+                                ActorToken configures the credential that identifies the gateway itself to the STS.
+                                This is used as the "actor_token" parameter in the exchange. The actor token represents
+                                the gateway's identity and is used by the STS to establish a delegation chain in the issued token.
+                              properties:
+                                clientAssertionJWT:
+                                  description: |-
+                                    ClientAssertionJWT configures the gateway to generate a signed JWT as the actor token
+                                    using a private key. This is the RECOMMENDED approach as it avoids long-lived static
+                                    tokens and enables key rotation.
+
+                                    NOTE: JWT actor token generation is not yet implemented. This field is reserved for future use.
+                                  properties:
+                                    issuer:
+                                      description: |-
+                                        Issuer is the "iss" claim value in the generated JWT.
+                                        Typically the gateway's client ID or identifier at the STS.
+                                      maxLength: 256
+                                      type: string
+                                    lifetime:
+                                      default: 300
+                                      description: Lifetime is the TTL of the generated
+                                        JWT in seconds. Defaults to 300 (5 minutes).
+                                      format: int32
+                                      type: integer
+                                    privateKeyRef:
+                                      description: |-
+                                        PrivateKeyRef references a Kubernetes Secret containing the private key used to sign the JWT.
+                                        The secret must have a key "privateKey" containing a PEM-encoded RSA or EC private key.
+                                      properties:
+                                        group:
+                                          default: ""
+                                          description: |-
+                                            Group is the group of the referent. For example, "gateway.networking.k8s.io".
+                                            When unspecified or empty string, core API group is inferred.
+                                          maxLength: 253
+                                          pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                          type: string
+                                        kind:
+                                          default: Secret
+                                          description: Kind is kind of the referent.
+                                            For example "Secret".
+                                          maxLength: 63
+                                          minLength: 1
+                                          pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                                          type: string
+                                        name:
+                                          description: Name is the name of the referent.
+                                          maxLength: 253
+                                          minLength: 1
+                                          type: string
+                                        namespace:
+                                          description: |-
+                                            Namespace is the namespace of the referenced object. When unspecified, the local
+                                            namespace is inferred.
+
+                                            Note that when a namespace different than the local namespace is specified,
+                                            a ReferenceGrant object is required in the referent namespace to allow that
+                                            namespace's owner to accept the reference. See the ReferenceGrant
+                                            documentation for details.
+
+                                            Support: Core
+                                          maxLength: 63
+                                          minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    signingAlgorithm:
+                                      default: RS256
+                                      description: SigningAlgorithm specifies the
+                                        JWT signing algorithm.
+                                      enum:
+                                      - RS256
+                                      - RS384
+                                      - RS512
+                                      - ES256
+                                      - ES384
+                                      - ES512
+                                      - PS256
+                                      - PS384
+                                      - PS512
+                                      - HS256
+                                      - HS384
+                                      - HS512
+                                      type: string
+                                    subject:
+                                      description: |-
+                                        Subject is the "sub" claim value in the generated JWT.
+                                        Typically the gateway's service account identifier.
+                                      maxLength: 256
+                                      type: string
+                                  required:
+                                  - issuer
+                                  - privateKeyRef
+                                  - subject
+                                  type: object
+                                secretRef:
+                                  description: |-
+                                    SecretRef references a Kubernetes Secret containing the actor token.
+                                    The Secret must have a key "token" containing the actor token value.
+                                  properties:
+                                    group:
+                                      default: ""
+                                      description: |-
+                                        Group is the group of the referent. For example, "gateway.networking.k8s.io".
+                                        When unspecified or empty string, core API group is inferred.
+                                      maxLength: 253
+                                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                      type: string
+                                    kind:
+                                      default: Secret
+                                      description: Kind is kind of the referent. For
+                                        example "Secret".
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                                      type: string
+                                    name:
+                                      description: Name is the name of the referent.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                    namespace:
+                                      description: |-
+                                        Namespace is the namespace of the referenced object. When unspecified, the local
+                                        namespace is inferred.
+
+                                        Note that when a namespace different than the local namespace is specified,
+                                        a ReferenceGrant object is required in the referent namespace to allow that
+                                        namespace's owner to accept the reference. See the ReferenceGrant
+                                        documentation for details.
+
+                                        Support: Core
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of secretRef or clientAssertionJWT
+                                  must be set
+                                rule: (has(self.secretRef) && !has(self.clientAssertionJWT))
+                                  || (!has(self.secretRef) && has(self.clientAssertionJWT))
+                            audience:
+                              description: |-
+                                Audience specifies the intended audience for the issued upstream token.
+                                This is used as the "audience" parameter in the token exchange request (RFC-8693 §2.1)
+                                and will appear as the "aud" claim in the issued JWT.
+                              maxLength: 256
+                              type: string
+                            cache:
+                              description: |-
+                                Cache configures token caching behavior to avoid performing a token exchange on every request.
+                                Caching is keyed on (subject_token, audience, scope).
+
+                                NOTE: Token caching is not yet implemented. This field is reserved for future use.
+                              properties:
+                                ttl:
+                                  description: TTL is the maximum time to cache an
+                                    exchanged token.
+                                  pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                                  type: string
+                              required:
+                              - ttl
+                              type: object
+                            clientAuth:
+                              description: |-
+                                ClientAuth configures how the gateway authenticates itself as an OAuth client to the STS
+                                token endpoint. This is separate from the actor token and applies to the client_id/client_secret
+                                used in the token exchange HTTP request itself.
+
+                                If not set, the STS request is made without client authentication (unauthenticated client).
+                                This is NOT RECOMMENDED for production.
+                              properties:
+                                clientID:
+                                  description: ClientID is the OAuth 2.0 client identifier
+                                    for the gateway at the STS.
+                                  maxLength: 256
+                                  type: string
+                                clientSecretRef:
+                                  description: |-
+                                    ClientSecretRef references a Kubernetes Secret containing the client secret.
+                                    The Secret must have a key "clientSecret".
+                                  properties:
+                                    group:
+                                      default: ""
+                                      description: |-
+                                        Group is the group of the referent. For example, "gateway.networking.k8s.io".
+                                        When unspecified or empty string, core API group is inferred.
+                                      maxLength: 253
+                                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                      type: string
+                                    kind:
+                                      default: Secret
+                                      description: Kind is kind of the referent. For
+                                        example "Secret".
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                                      type: string
+                                    name:
+                                      description: Name is the name of the referent.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                    namespace:
+                                      description: |-
+                                        Namespace is the namespace of the referenced object. When unspecified, the local
+                                        namespace is inferred.
+
+                                        Note that when a namespace different than the local namespace is specified,
+                                        a ReferenceGrant object is required in the referent namespace to allow that
+                                        namespace's owner to accept the reference. See the ReferenceGrant
+                                        documentation for details.
+
+                                        Support: Core
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                              required:
+                              - clientID
+                              - clientSecretRef
+                              type: object
+                            requestedTokenType:
+                              default: urn:ietf:params:oauth:token-type:access_token
+                              description: |-
+                                RequestedTokenType specifies the desired type of the issued token.
+                                Defaults to "urn:ietf:params:oauth:token-type:access_token".
+                              maxLength: 256
+                              type: string
+                            resource:
+                              description: |-
+                                Resource is the URI of the upstream MCP backend resource, used as the
+                                "resource" parameter in the exchange request (RFC-8693 §2.1, RFC 8707).
+                              format: uri
+                              maxLength: 2048
+                              type: string
+                            scopes:
+                              description: |-
+                                Scopes lists the OAuth 2.0 scopes to request for the issued upstream token.
+                                These are used as the "scope" parameter in the exchange request.
+                                When set as a per-route override, the scopes must be a subset of those
+                                configured on the BackendSecurityPolicy targeting the MCPBackend.
+                              items:
+                                maxLength: 256
+                                type: string
+                              maxItems: 32
+                              type: array
+                            stsEndpoint:
+                              description: |-
+                                STSEndpoint is the URL of the OAuth 2.0 token endpoint of the Security Token
+                                Service (STS) that will perform the token exchange. Must be an HTTPS URL.
+                              format: uri
+                              maxLength: 2048
+                              type: string
+                            subjectTokenType:
+                              default: urn:ietf:params:oauth:token-type:access_token
+                              description: |-
+                                SubjectTokenType is the token type URI for the subject_token parameter as defined in RFC-8693 §3.
+                                Defaults to "urn:ietf:params:oauth:token-type:access_token".
+                              maxLength: 256
+                              type: string
+                          type: object
                       type: object
+                      x-kubernetes-validations:
+                      - message: only one of apiKey or tokenExchange can be set
+                        rule: '!(has(self.apiKey) && has(self.tokenExchange))'
                     toolSelector:
                       description: |-
                         ToolSelector filters the tools exposed by this MCP server.
+                        Legacy mode: primary definition. MCPBackend mode: per-route override (narrows MCPBackend.spec.toolSelector).
                         Supports exact matches and RE2-compatible regular expressions for both include and exclude patterns.
                         If not specified, all tools from the MCP server are exposed.
                       properties:
@@ -5901,6 +6208,7 @@ spec:
                             Exclude is a list of tool names to exclude. The specified tools will not be available.
                             Exclude rules take precedence over include rules.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -5909,6 +6217,7 @@ spec:
                             ExcludeRegex is a list of RE2-compatible regular expressions that, when matched, exclude the tool.
                             Tools matching these patterns will not be available. Exclude rules take precedence over include rules.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -5916,6 +6225,7 @@ spec:
                           description: Include is a list of tool names to include.
                             Only the specified tools will be available.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -5924,6 +6234,7 @@ spec:
                             IncludeRegex is a list of RE2-compatible regular expressions that, when matched, include the tool.
                             Only tools matching these patterns will be available.
                           items:
+                            maxLength: 256
                             type: string
                           maxItems: 32
                           type: array
@@ -5941,6 +6252,25 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
+                  - message: MCPBackend references must set group to aigateway.envoyproxy.io
+                    rule: '!(has(self.kind) && self.kind == ''MCPBackend'') || (has(self.group)
+                      && self.group == ''aigateway.envoyproxy.io'')'
+                  - message: Backend references must set group to gateway.envoyproxy.io
+                    rule: '!(has(self.kind) && self.kind == ''Backend'' && has(self.group))
+                      || self.group == ''gateway.envoyproxy.io'''
+                  - message: path, port, and namespace are not valid for MCPBackend
+                      references
+                    rule: '!(has(self.kind) && self.kind == ''MCPBackend'') || (!has(self.path)
+                      && !has(self.port) && !has(self.namespace))'
+                  - message: in MCPBackend mode, securityPolicy may only contain tokenExchange
+                      overrides
+                    rule: '!(has(self.kind) && self.kind == ''MCPBackend'' && has(self.securityPolicy))
+                      || (has(self.securityPolicy.tokenExchange) && !has(self.securityPolicy.apiKey))'
+                  - message: in MCPBackend mode, only tokenExchange.scopes is allowed
+                      as override
+                    rule: '!(has(self.kind) && self.kind == ''MCPBackend'' && has(self.securityPolicy)
+                      && has(self.securityPolicy.tokenExchange)) || (!has(self.securityPolicy.tokenExchange.stsEndpoint)
+                      && !has(self.securityPolicy.tokenExchange.clientAuth) && !has(self.securityPolicy.tokenExchange.actorToken))'
                   - message: Must have port for Service reference
                     rule: '(size(self.group) == 0 && self.kind == ''Service'') ? has(self.port)
                       : true'

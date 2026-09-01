@@ -541,7 +541,13 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 
 	// Configuration for MCP processor.
 	var effectiveMCPRoute bool
-	ec.MCPConfig, effectiveMCPRoute = mcpConfig(mcpRoutes)
+	ec.MCPConfig, effectiveMCPRoute = mcpConfig(mcpRoutes, func(namespace, name string) (*aigv1b1.MCPBackend, error) {
+		var mcpBackend aigv1b1.MCPBackend
+		if err := c.client.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, &mcpBackend); err != nil {
+			return nil, err
+		}
+		return &mcpBackend, nil
+	})
 	hasEffectiveRoute = hasEffectiveRoute || effectiveMCPRoute
 
 	marshaled, err := yaml.Marshal(ec)
@@ -595,8 +601,12 @@ func (c *GatewayController) writeLegacyFilterConfigSecret(
 	return nil
 }
 
+// mcpBackendLookup fetches an MCPBackend by namespace/name so mcpConfig can merge
+// CRD-level tool selectors and forward headers with per-route overrides.
+type mcpBackendLookup func(namespace, name string) (*aigv1b1.MCPBackend, error)
+
 // reconcileFilterConfigSecretForMCPGateway updates the filter config secret for the external processor.
-func mcpConfig(mcpRoutes []aigv1b1.MCPRoute) (_ *filterapi.MCPConfig, hasEffectiveRoute bool) {
+func mcpConfig(mcpRoutes []aigv1b1.MCPRoute, lookup mcpBackendLookup) (_ *filterapi.MCPConfig, hasEffectiveRoute bool) {
 	if len(mcpRoutes) == 0 {
 		return nil, false
 	}
@@ -619,15 +629,32 @@ func mcpConfig(mcpRoutes []aigv1b1.MCPRoute) (_ *filterapi.MCPConfig, hasEffecti
 				// MCPRoute doesn't support cross-namespace backend reference so just use the name.
 				Name: filterapi.MCPBackendName(b.Name),
 			}
-			if b.ToolSelector != nil {
-				mcpBackend.ToolSelector = &filterapi.MCPToolSelector{
-					Include:      b.ToolSelector.Include,
-					IncludeRegex: b.ToolSelector.IncludeRegex,
-					Exclude:      b.ToolSelector.Exclude,
-					ExcludeRegex: b.ToolSelector.ExcludeRegex,
+			toolSelector := b.ToolSelector
+			forwardHeaders := b.ForwardHeaders
+			if b.IsMCPBackend() && lookup != nil {
+				crd, lookupErr := lookup(route.Namespace, string(b.Name))
+				if lookupErr != nil {
+					// Skip merge on lookup failure; the MCPRoute controller will surface the error.
+					// Still emit the backend so routing names stay stable.
+				} else if crd != nil {
+					if toolSelector == nil {
+						toolSelector = crd.Spec.ToolSelector
+					}
+					merged := make([]aigv1b1.MCPHeaderForward, 0, len(crd.Spec.ForwardHeaders)+len(b.ForwardHeaders))
+					merged = append(merged, crd.Spec.ForwardHeaders...)
+					merged = append(merged, b.ForwardHeaders...)
+					forwardHeaders = merged
 				}
 			}
-			for _, fh := range b.ForwardHeaders {
+			if toolSelector != nil {
+				mcpBackend.ToolSelector = &filterapi.MCPToolSelector{
+					Include:      toolSelector.Include,
+					IncludeRegex: toolSelector.IncludeRegex,
+					Exclude:      toolSelector.Exclude,
+					ExcludeRegex: toolSelector.ExcludeRegex,
+				}
+			}
+			for _, fh := range forwardHeaders {
 				hf := filterapi.MCPHeaderForward{Name: fh.Name}
 				if fh.BackendHeader != nil {
 					hf.BackendHeader = *fh.BackendHeader

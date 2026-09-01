@@ -71,12 +71,22 @@ func (c *AIBackendController) syncAIServiceBackend(ctx context.Context, aiBacken
 		client.MatchingFields{k8sClientIndexAIServiceBackendToTargetingBackendSecurityPolicy: key}); err != nil {
 		return fmt.Errorf("failed to list BackendSecurityPolicyList: %w", err)
 	}
-	if len(backendSecurityPolicyList.Items) > 1 {
-		var names []string
-		for i := range backendSecurityPolicyList.Items {
-			bsp := &backendSecurityPolicyList.Items[i]
-			names = append(names, bsp.Name)
+	// The index is keyed on name.namespace only and is shared across target kinds (InferencePool,
+	// MCPBackend). Filter to targetRefs that actually reference this AIServiceBackend so a same-named
+	// resource of another kind doesn't trip the "multiple BackendSecurityPolicies" check.
+	var names []string
+	for i := range backendSecurityPolicyList.Items {
+		bsp := &backendSecurityPolicyList.Items[i]
+		for _, target := range bsp.Spec.TargetRefs {
+			if string(target.Name) == aiBackend.Name &&
+				target.Group == aiServiceBackendGroup &&
+				target.Kind == aiServiceBackendKind {
+				names = append(names, bsp.Name)
+				break
+			}
 		}
+	}
+	if len(names) > 1 {
 		return fmt.Errorf("multiple BackendSecurityPolicies found for AIServiceBackend %s: %v",
 			aiBackend.Name, names)
 	}

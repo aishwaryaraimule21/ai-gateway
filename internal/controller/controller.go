@@ -177,8 +177,9 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 
 	backendSecurityPolicyEventChan := make(chan event.GenericEvent, 100)
 	inferencePoolEventChan := make(chan event.GenericEvent, 100)
+	mcpBackendEventChan := make(chan event.GenericEvent, 100)
 	backendSecurityPolicyC := NewBackendSecurityPolicyController(c, kubernetes.NewForConfigOrDie(config), logger.
-		WithName("backend-security-policy"), aiServiceBackendEventChan, inferencePoolEventChan)
+		WithName("backend-security-policy"), aiServiceBackendEventChan, inferencePoolEventChan, mcpBackendEventChan)
 	if err = TypedControllerBuilderForCRD(mgr, &aigv1b1.BackendSecurityPolicy{}).
 		WatchesRawSource(source.Channel(
 			backendSecurityPolicyEventChan,
@@ -219,6 +220,17 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 		}
 	}
 	mcpRouteEventChan := make(chan event.GenericEvent, 100)
+	mcpBackendC := NewMCPBackendController(c, kubernetes.NewForConfigOrDie(config), logger.
+		WithName("mcp-backend"), mcpRouteEventChan)
+	if err = TypedControllerBuilderForCRD(mgr, &aigv1b1.MCPBackend{}).
+		WatchesRawSource(source.Channel(
+			mcpBackendEventChan,
+			&handler.EnqueueRequestForObject{},
+		)).
+		Complete(mcpBackendC); err != nil {
+		return fmt.Errorf("failed to create controller for MCPBackend: %w", err)
+	}
+
 	secretC := NewSecretController(c, kubernetes.NewForConfigOrDie(config), logger.
 		WithName("secret"), backendSecurityPolicyEventChan, mcpRouteEventChan)
 	// Do not use TypedControllerBuilderForCRD for secret, as changing a secret content doesn't change the generation.
@@ -330,6 +342,12 @@ const (
 	// k8sClientIndexMCPRouteToOwnedHTTPRoute is the index name that maps from an MCPRoute to the
 	// HTTPRoutes it owns, enabling efficient lookup of child HTTPRoutes for orphan cleanup.
 	k8sClientIndexMCPRouteToOwnedHTTPRoute = "MCPRouteToOwnedHTTPRoute"
+	// k8sClientIndexMCPBackendToReferencingMCPRoute is the index name that maps from an MCPBackend
+	// to the MCPRoutes that reference it.
+	k8sClientIndexMCPBackendToReferencingMCPRoute = "MCPBackendToReferencingMCPRoute"
+	// k8sClientIndexMCPBackendToTargetingBackendSecurityPolicy is the index name that maps from an MCPBackend
+	// to the BackendSecurityPolicy whose targetRefs contains the MCPBackend.
+	k8sClientIndexMCPBackendToTargetingBackendSecurityPolicy = "MCPBackendToTargetingBackendSecurityPolicy"
 )
 
 // ApplyIndexing applies indexing to the given indexer. This is exported for testing purposes.
@@ -388,6 +406,16 @@ func ApplyIndexing(ctx context.Context, indexer func(ctx context.Context, obj cl
 	if err != nil {
 		return fmt.Errorf("failed to create index from MCPRoute to owned HTTPRoutes: %w", err)
 	}
+	err = indexer(ctx, &aigv1b1.MCPRoute{},
+		k8sClientIndexMCPBackendToReferencingMCPRoute, mcpRouteToReferencedMCPBackend)
+	if err != nil {
+		return fmt.Errorf("failed to create index from MCPBackend to MCPRoute: %w", err)
+	}
+	err = indexer(ctx, &aigv1b1.BackendSecurityPolicy{},
+		k8sClientIndexMCPBackendToTargetingBackendSecurityPolicy, backendSecurityPolicyMCPBackendTargetRefsIndexFunc)
+	if err != nil {
+		return fmt.Errorf("failed to index field for BackendSecurityPolicy MCPBackend targetRefs: %w", err)
+	}
 	return nil
 }
 
@@ -419,6 +447,18 @@ func mcpRouteToReferencedSecret(o client.Object) []string {
 			namespace = string(*apiKeyRef.Namespace)
 		}
 		ret = append(ret, fmt.Sprintf("%s.%s", apiKeyRef.Name, namespace))
+	}
+	return ret
+}
+
+func mcpRouteToReferencedMCPBackend(o client.Object) []string {
+	mcpRoute := o.(*aigv1b1.MCPRoute)
+	var ret []string
+	for _, ref := range mcpRoute.Spec.BackendRefs {
+		if !ref.IsMCPBackend() {
+			continue
+		}
+		ret = append(ret, fmt.Sprintf("%s.%s", ref.Name, mcpRoute.Namespace))
 	}
 	return ret
 }
@@ -494,6 +534,14 @@ func backendSecurityPolicyIndexFunc(o client.Object) []string {
 	case aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey:
 		apiKey := backendSecurityPolicy.Spec.AnthropicAPIKey
 		key = getSecretNameAndNamespace(apiKey.SecretRef, backendSecurityPolicy.Namespace)
+	case aigv1b1.BackendSecurityPolicyTypeMCPAPIKey:
+		if mcpAPIKey := backendSecurityPolicy.Spec.MCPAPIKey; mcpAPIKey != nil && mcpAPIKey.SecretRef != nil {
+			key = getSecretNameAndNamespace(mcpAPIKey.SecretRef, backendSecurityPolicy.Namespace)
+		}
+	case aigv1b1.BackendSecurityPolicyTypeTokenExchange:
+		if te := backendSecurityPolicy.Spec.TokenExchange; te != nil && te.ClientAuth != nil {
+			key = getSecretNameAndNamespace(&te.ClientAuth.ClientSecretRef, backendSecurityPolicy.Namespace)
+		}
 	case aigv1b1.BackendSecurityPolicyTypeAzureCredentials:
 		azureCreds := backendSecurityPolicy.Spec.AzureCredentials
 		if azureCreds.ClientSecretRef != nil {
@@ -509,6 +557,18 @@ func backendSecurityPolicyTargetRefsIndexFunc(o client.Object) []string {
 	backendSecurityPolicy := o.(*aigv1b1.BackendSecurityPolicy)
 	var ret []string
 	for _, targetRef := range backendSecurityPolicy.Spec.TargetRefs {
+		ret = append(ret, fmt.Sprintf("%s.%s", targetRef.Name, backendSecurityPolicy.Namespace))
+	}
+	return ret
+}
+
+func backendSecurityPolicyMCPBackendTargetRefsIndexFunc(o client.Object) []string {
+	backendSecurityPolicy := o.(*aigv1b1.BackendSecurityPolicy)
+	var ret []string
+	for _, targetRef := range backendSecurityPolicy.Spec.TargetRefs {
+		if targetRef.Kind != aigv1b1.MCPBackendKind {
+			continue
+		}
 		ret = append(ret, fmt.Sprintf("%s.%s", targetRef.Name, backendSecurityPolicy.Namespace))
 	}
 	return ret

@@ -112,16 +112,16 @@ type MCPRouteSpec struct {
 	BackendSelector *MCPBackendSelector `json:"backendSelector,omitempty"`
 }
 
-// MCPRouteBackendRef wraps a EG's BackendObjectReference to reference an MCP server.
-// TODO: move to a standalone MCPBackend CRD to avoid k8s object size limit.
+// MCPRouteBackendRef wraps an EG BackendObjectReference to reference an MCP server.
 type MCPRouteBackendRef struct {
 	gwapiv1.BackendObjectReference `json:",inline"`
 
 	// Path is the HTTP endpoint path of the backend MCP server.
-	// If not specified, the default is "/mcp".
+	// If not specified, the controller uses "/mcp". Not defaulted in the CRD so that the
+	// stored representation stays consistent with v1beta1 (which cannot default this field
+	// without tripping the MCPBackend path-forbidden validation).
 	//
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default:=/mcp
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Path *string `json:"path,omitempty"`
@@ -159,6 +159,7 @@ type MCPHeaderForward struct {
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	Name string `json:"name"`
 
 	// BackendHeader is the header name to use when forwarding to the backend.
@@ -166,6 +167,7 @@ type MCPHeaderForward struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	BackendHeader *string `json:"backendHeader,omitempty"`
 }
@@ -182,6 +184,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	Include []string `json:"include,omitempty"`
 
@@ -190,6 +193,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	IncludeRegex []string `json:"includeRegex,omitempty"`
 
@@ -198,6 +202,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	Exclude []string `json:"exclude,omitempty"`
 
@@ -206,6 +211,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	ExcludeRegex []string `json:"excludeRegex,omitempty"`
 }
@@ -242,6 +248,7 @@ type MCPBackendAPIKey struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Header *string `json:"header,omitempty"`
 
@@ -253,6 +260,7 @@ type MCPBackendAPIKey struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	QueryParam *string `json:"queryParam,omitempty"`
 }

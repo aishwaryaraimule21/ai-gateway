@@ -236,6 +236,35 @@ func Test_backendSecurityPolicyIndexFunc(t *testing.T) {
 			},
 			expKey: "some-aaaa.ns",
 		},
+		{
+			name: "mcp api key secret ref",
+			backendSecurityPolicy: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcp-api-key-bsp", Namespace: "ns"},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeMCPAPIKey,
+					MCPAPIKey: &aigv1b1.MCPBackendAPIKey{
+						SecretRef: &gwapiv1.SecretObjectReference{Name: "mcp-secret"},
+					},
+				},
+			},
+			expKey: "mcp-secret.ns",
+		},
+		{
+			name: "token exchange client secret",
+			backendSecurityPolicy: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "token-exchange-bsp", Namespace: "ns"},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeTokenExchange,
+					TokenExchange: &aigv1b1.MCPBackendTokenExchange{
+						ClientAuth: &aigv1b1.MCPTokenExchangeClientAuth{
+							ClientID:        "client",
+							ClientSecretRef: gwapiv1.SecretObjectReference{Name: "sts-secret"},
+						},
+					},
+				},
+			},
+			expKey: "sts-secret.ns",
+		},
 	} {
 		t.Run(bsp.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().
@@ -805,4 +834,62 @@ func Test_isKubernetes133OrLater(t *testing.T) {
 	require.False(t, isKubernetes133OrLater(&version.Info{Major: "1", Minor: "32"}, logr.Discard()))
 	require.True(t, isKubernetes133OrLater(&version.Info{Major: "1", Minor: "33"}, logr.Discard()))
 	require.True(t, isKubernetes133OrLater(&version.Info{Major: "1", Minor: "40"}, logr.Discard()))
+}
+
+func Test_mcpRouteToReferencedMCPBackend(t *testing.T) {
+	c := requireNewFakeClientWithIndexesForMCP(t)
+
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mixed", Namespace: "default"},
+		Spec: aigv1b1.MCPRouteSpec{
+			ParentRefs: []gwapiv1.ParentReference{{Name: "gtw"}},
+			BackendRefs: []aigv1b1.MCPRouteBackendRef{
+				{BackendObjectReference: gwapiv1.BackendObjectReference{
+					Name: "legacy-svc", Port: ptr.To[gwapiv1.PortNumber](80),
+				}},
+				{BackendObjectReference: gwapiv1.BackendObjectReference{
+					Name:  "from-crd",
+					Group: ptr.To(gwapiv1.Group(aigv1b1.GroupName)),
+					Kind:  ptr.To(gwapiv1.Kind(aigv1b1.MCPBackendKind)),
+				}},
+			},
+		},
+	}))
+
+	var routes aigv1b1.MCPRouteList
+	err := c.List(t.Context(), &routes, client.MatchingFields{k8sClientIndexMCPBackendToReferencingMCPRoute: "from-crd.default"})
+	require.NoError(t, err)
+	require.Len(t, routes.Items, 1)
+	require.Equal(t, "mixed", routes.Items[0].Name)
+
+	err = c.List(t.Context(), &routes, client.MatchingFields{k8sClientIndexMCPBackendToReferencingMCPRoute: "legacy-svc.default"})
+	require.NoError(t, err)
+	require.Empty(t, routes.Items)
+}
+
+func Test_backendSecurityPolicyMCPBackendTargetRefsIndexFunc(t *testing.T) {
+	c := requireNewFakeClientWithIndexes(t)
+
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-bsp", Namespace: "default"},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type: aigv1b1.BackendSecurityPolicyTypeMCPAPIKey,
+			MCPAPIKey: &aigv1b1.MCPBackendAPIKey{
+				Inline: ptr.To("key"),
+			},
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
+				{Group: aigv1b1.GroupName, Kind: aigv1b1.MCPBackendKind, Name: "mcp-backend"},
+				{Group: aigv1b1.GroupName, Kind: "AIServiceBackend", Name: "aisb"},
+			},
+		},
+	}))
+
+	var bsps aigv1b1.BackendSecurityPolicyList
+	err := c.List(t.Context(), &bsps, client.MatchingFields{k8sClientIndexMCPBackendToTargetingBackendSecurityPolicy: "mcp-backend.default"})
+	require.NoError(t, err)
+	require.Len(t, bsps.Items, 1)
+
+	err = c.List(t.Context(), &bsps, client.MatchingFields{k8sClientIndexMCPBackendToTargetingBackendSecurityPolicy: "aisb.default"})
+	require.NoError(t, err)
+	require.Empty(t, bsps.Items)
 }

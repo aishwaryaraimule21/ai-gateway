@@ -1052,7 +1052,7 @@ func TestGatewayMutator_listMCPRoutesForGateway_NoCacheReaderFallback(t *testing
 				{Name: gwapiv1.ObjectName(gwName)},
 			},
 			BackendRefs: []aigv1b1.MCPRouteBackendRef{
-				{BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("server")}},
+				{BackendObjectReference: gwapiv1.BackendObjectReference{Name: "server"}},
 			},
 		},
 	})
@@ -1066,7 +1066,7 @@ func TestGatewayMutator_listMCPRoutesForGateway_NoCacheReaderFallback(t *testing
 				{Name: gwapiv1.ObjectName("other-gw")},
 			},
 			BackendRefs: []aigv1b1.MCPRouteBackendRef{
-				{BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName("other")}},
+				{BackendObjectReference: gwapiv1.BackendObjectReference{Name: "other"}},
 			},
 		},
 	})

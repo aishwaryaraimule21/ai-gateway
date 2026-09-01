@@ -101,7 +101,11 @@ func TestAIServiceBackendController_Reconcile_error_with_multiple_bsps(t *testin
 		bsp := &aigv1b1.BackendSecurityPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("bsp-%d", i), Namespace: namespace},
 			Spec: aigv1b1.BackendSecurityPolicySpec{
-				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: gwapiv1.ObjectName(backendName)}},
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{
+					Group: aigv1b1.GroupName,
+					Kind:  "AIServiceBackend",
+					Name:  gwapiv1.ObjectName(backendName),
+				}},
 			},
 		}
 		require.NoError(t, fakeClient.Create(t.Context(), bsp))
@@ -111,4 +115,45 @@ func TestAIServiceBackendController_Reconcile_error_with_multiple_bsps(t *testin
 	require.NoError(t, err)
 	_, err = c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: backendName}})
 	require.ErrorContains(t, err, `multiple BackendSecurityPolicies found for AIServiceBackend mybackend: [bsp-0 bsp-1 bsp-2 bsp-3 bsp-4]`)
+}
+
+// TestAIServiceBackendController_Reconcile_ignores_mcpbackend_bsp verifies that a
+// BackendSecurityPolicy targeting an MCPBackend that shares the AIServiceBackend's
+// name+namespace is not counted against the AIServiceBackend. The targeting index is
+// keyed on name.namespace only, so the controller must kind-filter targetRefs.
+func TestAIServiceBackendController_Reconcile_ignores_mcpbackend_bsp(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	eventChan := internaltesting.NewControllerEventChan[*aigv1b1.AIGatewayRoute]()
+	c := NewAIServiceBackendController(fakeClient, fake2.NewClientset(), ctrl.Log, eventChan.Ch)
+
+	const name, namespace = "shared-name", "default"
+
+	// One BSP legitimately targets the AIServiceBackend.
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "aisb-bsp", Namespace: namespace},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{
+				Group: aigv1b1.GroupName,
+				Kind:  "AIServiceBackend",
+				Name:  gwapiv1.ObjectName(name),
+			}},
+		},
+	}))
+	// Another BSP targets a same-named MCPBackend; it must be ignored by the AISB check.
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-bsp", Namespace: namespace},
+		Spec: aigv1b1.BackendSecurityPolicySpec{
+			Type:      aigv1b1.BackendSecurityPolicyTypeMCPAPIKey,
+			MCPAPIKey: &aigv1b1.MCPBackendAPIKey{Inline: ptr.To("key")},
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{
+				Group: aigv1b1.GroupName,
+				Kind:  aigv1b1.MCPBackendKind,
+				Name:  gwapiv1.ObjectName(name),
+			}},
+		},
+	}))
+
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}))
+	_, err := c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}})
+	require.NoError(t, err)
 }

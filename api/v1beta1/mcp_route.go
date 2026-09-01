@@ -8,6 +8,7 @@ package v1beta1
 import (
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -112,45 +113,63 @@ type MCPRouteSpec struct {
 	BackendSelector *MCPBackendSelector `json:"backendSelector,omitempty"`
 }
 
-// MCPRouteBackendRef wraps a EG's BackendObjectReference to reference an MCP server.
-// TODO: move to a standalone MCPBackend CRD to avoid k8s object size limit.
+// MCPRouteBackendRef references either an inline backend (legacy) or an MCPBackend resource.
+// Format detection via kind/group:
+//   - omitted kind/group, kind: Service, or kind: Backend + group: gateway.envoyproxy.io → legacy inline mode.
+//   - kind: MCPBackend + group: aigateway.envoyproxy.io → MCPBackend reference mode.
+//
+// BackendObjectReference is embedded to preserve the Go composite-literal API used by
+// existing clients. Its JSON field names remain name, group, kind, port, and namespace.
+// +kubebuilder:validation:XValidation:rule="!(has(self.kind) && self.kind == 'MCPBackend') || (has(self.group) && self.group == 'aigateway.envoyproxy.io')",message="MCPBackend references must set group to aigateway.envoyproxy.io"
+// +kubebuilder:validation:XValidation:rule="!(has(self.kind) && self.kind == 'Backend' && has(self.group)) || self.group == 'gateway.envoyproxy.io'",message="Backend references must set group to gateway.envoyproxy.io"
+// +kubebuilder:validation:XValidation:rule="!(has(self.kind) && self.kind == 'MCPBackend') || (!has(self.path) && !has(self.port) && !has(self.namespace))",message="path, port, and namespace are not valid for MCPBackend references"
+// +kubebuilder:validation:XValidation:rule="!(has(self.kind) && self.kind == 'MCPBackend' && has(self.securityPolicy)) || (has(self.securityPolicy.tokenExchange) && !has(self.securityPolicy.apiKey))",message="in MCPBackend mode, securityPolicy may only contain tokenExchange overrides"
+// +kubebuilder:validation:XValidation:rule="!(has(self.kind) && self.kind == 'MCPBackend' && has(self.securityPolicy) && has(self.securityPolicy.tokenExchange)) || (!has(self.securityPolicy.tokenExchange.stsEndpoint) && !has(self.securityPolicy.tokenExchange.clientAuth) && !has(self.securityPolicy.tokenExchange.actorToken))",message="in MCPBackend mode, only tokenExchange.scopes is allowed as override"
 type MCPRouteBackendRef struct {
 	gwapiv1.BackendObjectReference `json:",inline"`
 
 	// Path is the HTTP endpoint path of the backend MCP server.
+	// Only valid for kind: Backend or Service. Use MCPBackend.spec.path instead for MCPBackend references.
 	// If not specified, the default is "/mcp".
 	//
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default:=/mcp
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Path *string `json:"path,omitempty"`
 
 	// ToolSelector filters the tools exposed by this MCP server.
+	// Legacy mode: primary definition. MCPBackend mode: per-route override (narrows MCPBackend.spec.toolSelector).
 	// Supports exact matches and RE2-compatible regular expressions for both include and exclude patterns.
 	// If not specified, all tools from the MCP server are exposed.
-	// +kubebuilder:validation:Optional
 	// +optional
 	ToolSelector *MCPToolFilter `json:"toolSelector,omitempty"`
 
 	// TODO: we can add resource and prompt selectors in the future.
 
-	// SecurityPolicy is the security policy to apply to this MCP server.
+	// SecurityPolicy defines security configuration for this backend reference.
+	// Legacy mode (kind: Backend or Service): full security policy definition (API key or token exchange).
+	// MCPBackend mode (kind: MCPBackend): per-route override. Only override-able fields are
+	// allowed — specifically tokenExchange.scopes to narrow scopes for this route.
+	// The scopes must be a subset of those configured in the BackendSecurityPolicy's
+	// tokenExchange.scopes targeting this MCPBackend.
 	//
-	// +kubebuilder:validation:Optional
 	// +optional
 	SecurityPolicy *MCPBackendSecurityPolicy `json:"securityPolicy,omitempty"`
 
 	// ForwardHeaders specifies HTTP headers to extract from the incoming client request
 	// and forward to this backend MCP server.
+	// Legacy mode: primary definition. MCPBackend mode: per-route override (extends MCPBackend.spec.forwardHeaders).
 	// This enables per-user authentication passthrough (e.g., personal access tokens)
 	// without requiring OAuth configuration.
 	// Each entry specifies a header name to extract and an optional rename for the backend.
 	//
-	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
 	// +optional
 	ForwardHeaders []MCPHeaderForward `json:"forwardHeaders,omitempty"`
+}
+
+// IsMCPBackend returns true when this backendRef points at a standalone MCPBackend CRD.
+func (r *MCPRouteBackendRef) IsMCPBackend() bool {
+	return ptr.Deref(r.Kind, "") == MCPBackendKind && ptr.Deref(r.Group, "") == GroupName
 }
 
 // MCPHeaderForward specifies a header to extract from the incoming request and forward to a backend.
@@ -159,6 +178,7 @@ type MCPHeaderForward struct {
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	Name string `json:"name"`
 
 	// BackendHeader is the header name to use when forwarding to the backend.
@@ -166,6 +186,7 @@ type MCPHeaderForward struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	BackendHeader *string `json:"backendHeader,omitempty"`
 }
@@ -182,6 +203,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	Include []string `json:"include,omitempty"`
 
@@ -190,6 +212,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	IncludeRegex []string `json:"includeRegex,omitempty"`
 
@@ -198,6 +221,7 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	Exclude []string `json:"exclude,omitempty"`
 
@@ -206,15 +230,25 @@ type MCPToolFilter struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	ExcludeRegex []string `json:"excludeRegex,omitempty"`
 }
 
 // MCPBackendSecurityPolicy defines the security policy for a backend MCP server.
+// Exactly one of APIKey or TokenExchange may be set.
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.apiKey) && has(self.tokenExchange))",message="only one of apiKey or tokenExchange can be set"
 type MCPBackendSecurityPolicy struct {
 	// APIKey is a mechanism to access a backend. The API key will be injected into the request headers.
 	// +optional
 	APIKey *MCPBackendAPIKey `json:"apiKey,omitempty"`
+
+	// TokenExchange configures OAuth 2.0 Token Exchange (RFC-8693) as the upstream auth method,
+	// or a per-route override of tokenExchange.scopes when the backendRef kind is MCPBackend.
+	//
+	// +optional
+	TokenExchange *MCPBackendTokenExchange `json:"tokenExchange,omitempty"`
 }
 
 // MCPBackendAPIKey defines the configuration for the API Key Authentication to a backend.
@@ -242,6 +276,7 @@ type MCPBackendAPIKey struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Header *string `json:"header,omitempty"`
 
@@ -256,8 +291,180 @@ type MCPBackendAPIKey struct {
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	QueryParam *string `json:"queryParam,omitempty"`
+}
+
+// MCPBackendTokenExchange configures OAuth 2.0 Token Exchange (RFC-8693) as the
+// upstream authentication method for an MCP backend. The gateway exchanges the
+// incoming user token for a new token valid for the specific MCP backend by
+// calling an external Security Token Service (STS).
+//
+// When used as a per-route override on MCPRouteBackendRef with kind: MCPBackend,
+// only Scopes may be set.
+type MCPBackendTokenExchange struct {
+	// STSEndpoint is the URL of the OAuth 2.0 token endpoint of the Security Token
+	// Service (STS) that will perform the token exchange. Must be an HTTPS URL.
+	//
+	// +optional
+	// +kubebuilder:validation:Format=uri
+	// +kubebuilder:validation:MaxLength=2048
+	STSEndpoint string `json:"stsEndpoint,omitempty"`
+
+	// SubjectTokenType is the token type URI for the subject_token parameter as defined in RFC-8693 §3.
+	// Defaults to "urn:ietf:params:oauth:token-type:access_token".
+	//
+	// +kubebuilder:default="urn:ietf:params:oauth:token-type:access_token"
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	SubjectTokenType *string `json:"subjectTokenType,omitempty"`
+
+	// Audience specifies the intended audience for the issued upstream token.
+	// This is used as the "audience" parameter in the token exchange request (RFC-8693 §2.1)
+	// and will appear as the "aud" claim in the issued JWT.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Audience *string `json:"audience,omitempty"`
+
+	// Resource is the URI of the upstream MCP backend resource, used as the
+	// "resource" parameter in the exchange request (RFC-8693 §2.1, RFC 8707).
+	//
+	// +optional
+	// +kubebuilder:validation:Format=uri
+	// +kubebuilder:validation:MaxLength=2048
+	Resource *string `json:"resource,omitempty"`
+
+	// Scopes lists the OAuth 2.0 scopes to request for the issued upstream token.
+	// These are used as the "scope" parameter in the exchange request.
+	// When set as a per-route override, the scopes must be a subset of those
+	// configured on the BackendSecurityPolicy targeting the MCPBackend.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
+	Scopes []string `json:"scopes,omitempty"`
+
+	// RequestedTokenType specifies the desired type of the issued token.
+	// Defaults to "urn:ietf:params:oauth:token-type:access_token".
+	//
+	// +kubebuilder:default="urn:ietf:params:oauth:token-type:access_token"
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	RequestedTokenType *string `json:"requestedTokenType,omitempty"`
+
+	// ActorToken configures the credential that identifies the gateway itself to the STS.
+	// This is used as the "actor_token" parameter in the exchange. The actor token represents
+	// the gateway's identity and is used by the STS to establish a delegation chain in the issued token.
+	//
+	// +optional
+	ActorToken *MCPBackendTokenExchangeActorToken `json:"actorToken,omitempty"`
+
+	// ClientAuth configures how the gateway authenticates itself as an OAuth client to the STS
+	// token endpoint. This is separate from the actor token and applies to the client_id/client_secret
+	// used in the token exchange HTTP request itself.
+	//
+	// If not set, the STS request is made without client authentication (unauthenticated client).
+	// This is NOT RECOMMENDED for production.
+	//
+	// +optional
+	ClientAuth *MCPTokenExchangeClientAuth `json:"clientAuth,omitempty"`
+
+	// Cache configures token caching behavior to avoid performing a token exchange on every request.
+	// Caching is keyed on (subject_token, audience, scope).
+	//
+	// NOTE: Token caching is not yet implemented. This field is reserved for future use.
+	//
+	// +optional
+	Cache *MCPTokenExchangeCacheConfig `json:"cache,omitempty"`
+}
+
+// MCPBackendTokenExchangeActorToken configures the credential used as the actor_token in the token
+// exchange request, representing the gateway's identity.
+//
+// Exactly one of SecretRef or ClientAssertionJWT must be set.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.secretRef) && !has(self.clientAssertionJWT)) || (!has(self.secretRef) && has(self.clientAssertionJWT))",message="exactly one of secretRef or clientAssertionJWT must be set"
+type MCPBackendTokenExchangeActorToken struct {
+	// SecretRef references a Kubernetes Secret containing the actor token.
+	// The Secret must have a key "token" containing the actor token value.
+	//
+	// +optional
+	SecretRef *gwapiv1.SecretObjectReference `json:"secretRef,omitempty"`
+
+	// ClientAssertionJWT configures the gateway to generate a signed JWT as the actor token
+	// using a private key. This is the RECOMMENDED approach as it avoids long-lived static
+	// tokens and enables key rotation.
+	//
+	// NOTE: JWT actor token generation is not yet implemented. This field is reserved for future use.
+	//
+	// +optional
+	ClientAssertionJWT *MCPTokenExchangeJWTActorConfig `json:"clientAssertionJWT,omitempty"`
+}
+
+// MCPTokenExchangeJWTActorConfig configures JWT generation for the actor token.
+//
+// NOTE: This configuration is defined for future use. JWT actor token generation is not yet implemented.
+type MCPTokenExchangeJWTActorConfig struct {
+	// Issuer is the "iss" claim value in the generated JWT.
+	// Typically the gateway's client ID or identifier at the STS.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=256
+	Issuer string `json:"issuer"`
+
+	// Subject is the "sub" claim value in the generated JWT.
+	// Typically the gateway's service account identifier.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=256
+	Subject string `json:"subject"`
+
+	// PrivateKeyRef references a Kubernetes Secret containing the private key used to sign the JWT.
+	// The secret must have a key "privateKey" containing a PEM-encoded RSA or EC private key.
+	//
+	// +kubebuilder:validation:Required
+	PrivateKeyRef gwapiv1.SecretObjectReference `json:"privateKeyRef"`
+
+	// SigningAlgorithm specifies the JWT signing algorithm.
+	//
+	// +kubebuilder:default="RS256"
+	// +kubebuilder:validation:Enum=RS256;RS384;RS512;ES256;ES384;ES512;PS256;PS384;PS512;HS256;HS384;HS512
+	// +optional
+	SigningAlgorithm *string `json:"signingAlgorithm,omitempty"`
+
+	// Lifetime is the TTL of the generated JWT in seconds. Defaults to 300 (5 minutes).
+	//
+	// +kubebuilder:default=300
+	// +optional
+	Lifetime *int32 `json:"lifetime,omitempty"`
+}
+
+// MCPTokenExchangeClientAuth configures client authentication at the STS token endpoint.
+// This is how the gateway authenticates itself as an OAuth 2.0 client (client_id + credential).
+type MCPTokenExchangeClientAuth struct {
+	// ClientID is the OAuth 2.0 client identifier for the gateway at the STS.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=256
+	ClientID string `json:"clientID"`
+
+	// ClientSecretRef references a Kubernetes Secret containing the client secret.
+	// The Secret must have a key "clientSecret".
+	//
+	// +kubebuilder:validation:Required
+	ClientSecretRef gwapiv1.SecretObjectReference `json:"clientSecretRef"`
+}
+
+// MCPTokenExchangeCacheConfig configures token caching for exchanged tokens.
+//
+// NOTE: Token caching is not yet implemented. This field is reserved for future use.
+type MCPTokenExchangeCacheConfig struct {
+	// TTL is the maximum time to cache an exchanged token.
+	//
+	// +kubebuilder:validation:Required
+	TTL gwapiv1.Duration `json:"ttl"`
 }
 
 // MCPRouteSecurityPolicy defines the security policy for a MCPRoute.

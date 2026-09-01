@@ -1,0 +1,285 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: mcpbackends.aigateway.envoyproxy.io
+spec:
+  group: aigateway.envoyproxy.io
+  names:
+    kind: MCPBackend
+    listKind: MCPBackendList
+    plural: mcpbackends
+    singular: mcpbackend
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[-1:].type
+      name: Status
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MCPBackend is a resource that represents a single upstream MCP server.
+          It wraps an Envoy Gateway Backend with MCP-specific configuration including
+          the server endpoint path, tool selectors, and header forwarding rules.
+
+          An MCPBackend is referenced by MCPRoute.spec.backendRefs[] and can be targeted
+          by a BackendSecurityPolicy for upstream authentication configuration.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec defines the details of the MCPBackend.
+            properties:
+              backendRef:
+                description: 'BackendRef references the Envoy Gateway Backend (network-level:
+                  hostname, port, TLS).'
+                properties:
+                  group:
+                    default: ""
+                    description: |-
+                      Group is the group of the referent. For example, "gateway.networking.k8s.io".
+                      When unspecified or empty string, core API group is inferred.
+                    maxLength: 253
+                    pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  kind:
+                    default: Service
+                    description: |-
+                      Kind is the Kubernetes resource kind of the referent. For example
+                      "Service".
+
+                      Defaults to "Service" when not specified.
+
+                      ExternalName services can refer to CNAME DNS records that may live
+                      outside of the cluster and as such are difficult to reason about in
+                      terms of conformance. They also may not be safe to forward to (see
+                      CVE-2021-25740 for more information). Implementations SHOULD NOT
+                      support ExternalName Services.
+
+                      Support: Core (Services with a type other than ExternalName)
+
+                      Support: Implementation-specific (Services with type ExternalName)
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                    type: string
+                  name:
+                    description: Name is the name of the referent.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the backend. When unspecified, the local
+                      namespace is inferred.
+
+                      Note that when a namespace different than the local namespace is specified,
+                      a ReferenceGrant object is required in the referent namespace to allow that
+                      namespace's owner to accept the reference. See the ReferenceGrant
+                      documentation for details.
+
+                      Support: Core
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  port:
+                    description: |-
+                      Port specifies the destination port number to use for this resource.
+                      Port is required when the referent is a Kubernetes Service. In this
+                      case, the port number is the service port number, not the target port.
+                      For other resources, destination port might be derived from the referent
+                      resource or this field.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: must reference an Envoy Gateway Backend
+                  rule: has(self.kind) && self.kind == 'Backend' && has(self.group)
+                    && self.group == 'gateway.envoyproxy.io'
+                - message: Must have port for Service reference
+                  rule: '(size(self.group) == 0 && self.kind == ''Service'') ? has(self.port)
+                    : true'
+              forwardHeaders:
+                description: ForwardHeaders specifies headers to extract from client
+                  requests and forward to this backend.
+                items:
+                  description: MCPHeaderForward specifies a header to extract from
+                    the incoming request and forward to a backend.
+                  properties:
+                    backendHeader:
+                      description: |-
+                        BackendHeader is the header name to use when forwarding to the backend.
+                        If not specified, the original header name is used.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the header name to extract from the incoming
+                        client request.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 32
+                type: array
+              path:
+                default: /mcp
+                description: Path is the HTTP endpoint path of the backend MCP server.
+                  Defaults to "/mcp".
+                maxLength: 1024
+                type: string
+              toolSelector:
+                description: |-
+                  ToolSelector filters the tools exposed by this MCP server.
+                  Supports exact matches and RE2-compatible regular expressions for both include and exclude patterns.
+                  If not specified, all tools from the MCP server are exposed.
+                properties:
+                  exclude:
+                    description: |-
+                      Exclude is a list of tool names to exclude. The specified tools will not be available.
+                      Exclude rules take precedence over include rules.
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 32
+                    type: array
+                  excludeRegex:
+                    description: |-
+                      ExcludeRegex is a list of RE2-compatible regular expressions that, when matched, exclude the tool.
+                      Tools matching these patterns will not be available. Exclude rules take precedence over include rules.
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 32
+                    type: array
+                  include:
+                    description: Include is a list of tool names to include. Only
+                      the specified tools will be available.
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 32
+                    type: array
+                  includeRegex:
+                    description: |-
+                      IncludeRegex is a list of RE2-compatible regular expressions that, when matched, include the tool.
+                      Only tools matching these patterns will be available.
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 32
+                    type: array
+                type: object
+                x-kubernetes-validations:
+                - message: include and includeRegex are mutually exclusive
+                  rule: '!(has(self.include) && has(self.includeRegex))'
+                - message: exclude and excludeRegex are mutually exclusive
+                  rule: '!(has(self.exclude) && has(self.excludeRegex))'
+                - message: at least one of include, includeRegex, exclude, or excludeRegex
+                    must be specified
+                  rule: has(self.include) || has(self.includeRegex) || has(self.exclude)
+                    || has(self.excludeRegex)
+            required:
+            - backendRef
+            type: object
+          status:
+            description: Status defines the status details of the MCPBackend.
+            properties:
+              conditions:
+                description: |-
+                  Conditions is the list of conditions by the reconciliation result.
+                  Currently, at most one condition is set.
+
+                  Known .status.conditions.type are: "Accepted", "NotAccepted".
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

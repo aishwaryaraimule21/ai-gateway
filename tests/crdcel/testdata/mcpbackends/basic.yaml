@@ -1,0 +1,22 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPBackend
+metadata:
+  name: basic-mcp-backend
+  namespace: default
+spec:
+  backendRef:
+    name: mcp-eg-backend
+    kind: Backend
+    group: gateway.envoyproxy.io
+  path: /mcp
+  toolSelector:
+    include:
+      - echo
+  forwardHeaders:
+    - name: Authorization
+      backendHeader: X-Backend-Auth

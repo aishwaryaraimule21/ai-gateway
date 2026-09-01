@@ -1,0 +1,177 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: mcp-gateway-class-mixed
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mcp-gateway-mixed
+  namespace: default
+spec:
+  gatewayClassName: mcp-gateway-class-mixed
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: envoy-mcp-gateway-mixed
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPRoute
+metadata:
+  name: mcp-route-mixed
+  namespace: default
+spec:
+  parentRefs:
+    - name: mcp-gateway-mixed
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  backendRefs:
+    - name: mcp-from-crd
+      kind: MCPBackend
+      group: aigateway.envoyproxy.io
+    - name: mcp-legacy
+      port: 1063
+      securityPolicy:
+        apiKey:
+          inline: "test-api-key"
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPBackend
+metadata:
+  name: mcp-from-crd
+  namespace: default
+spec:
+  backendRef:
+    name: mcp-from-crd-eg
+    kind: Backend
+    group: gateway.envoyproxy.io
+  path: /mcp
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: BackendSecurityPolicy
+metadata:
+  name: mcp-from-crd-bsp
+  namespace: default
+spec:
+  type: MCPAPIKey
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: MCPBackend
+      name: mcp-from-crd
+  mcpAPIKey:
+    inline: "test-api-key"
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: mcp-from-crd-eg
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: mcp-from-crd.default.svc.cluster.local
+        port: 1063
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-from-crd
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-from-crd
+  template:
+    metadata:
+      labels:
+        app: mcp-from-crd
+    spec:
+      containers:
+        - name: mcp-from-crd
+          image: docker.io/envoyproxy/ai-gateway-testmcpserver:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 1063
+          env:
+            - name: TEST_API_KEY
+              value: "test-api-key"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-from-crd
+  namespace: default
+spec:
+  selector:
+    app: mcp-from-crd
+  ports:
+    - protocol: TCP
+      port: 1063
+      targetPort: 1063
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-legacy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-legacy
+  template:
+    metadata:
+      labels:
+        app: mcp-legacy
+    spec:
+      containers:
+        - name: mcp-legacy
+          image: docker.io/envoyproxy/ai-gateway-testmcpserver:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 1063
+          env:
+            - name: TEST_API_KEY
+              value: "test-api-key"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-legacy
+  namespace: default
+spec:
+  selector:
+    app: mcp-legacy
+  ports:
+    - protocol: TCP
+      port: 1063
+      targetPort: 1063
+  type: ClusterIP
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: envoy-mcp-gateway-mixed
+  namespace: default
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          # Clear the default memory/cpu requirements for local tests.
+          resources: {}
